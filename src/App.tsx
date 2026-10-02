@@ -1,20 +1,12 @@
 import { useState, type FormEvent } from 'react'
+import { loginWithRole, MOCK_PASSWORD, type Role } from './lib/auth'
+import { isSupabaseConfigured } from './lib/supabase'
 
-type Role = 'Master' | 'Worker'
 type Step = 'role' | 'password' | 'success'
 
 const ROLE_LABELS: Record<Role, string> = {
   Master: 'Мастер',
   Worker: 'Исполнитель',
-}
-
-/** Мок-проверка пароля: заменяется на API-запрос при подключении бэкенда. */
-const MOCK_PASSWORD = '1234'
-
-function mockLogin(password: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    setTimeout(() => resolve(password === MOCK_PASSWORD), 600)
-  })
 }
 
 export default function App() {
@@ -39,17 +31,19 @@ export default function App() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (loading) return
+    if (loading || !role) return
 
     setError(null)
     setLoading(true)
     try {
-      const ok = await mockLogin(password)
+      const ok = await loginWithRole(role, password)
       if (ok) {
         setStep('success')
       } else {
         setError('Неверный пароль. Попробуйте ещё раз.')
       }
+    } catch (err) {
+      setError(err instanceof Error ? `Ошибка связи: ${err.message}` : 'Ошибка связи с сервером.')
     } finally {
       setLoading(false)
     }
@@ -155,7 +149,7 @@ export default function App() {
       </main>
 
       <footer className="px-6 pb-6 text-center text-xs text-neutral-400 sm:pb-8">
-        Демо-пароль: {MOCK_PASSWORD}
+        {isSupabaseConfigured ? 'Supabase подключён' : `Демо-пароль: ${MOCK_PASSWORD}`}
       </footer>
     </div>
   )

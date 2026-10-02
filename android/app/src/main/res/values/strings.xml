@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Auth Screen</string>
+    <string name="title_activity_main">Auth Screen</string>
+    <string name="package_name">ru.hackaton.authscreen</string>
+    <string name="custom_url_scheme">ru.hackaton.authscreen</string>
+</resources>
