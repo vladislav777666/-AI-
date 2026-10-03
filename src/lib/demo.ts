@@ -2,8 +2,8 @@
 // localStorage-хранилище с сеялкой данных. Тот же контракт, что и у db.ts.
 
 import type {
-  Acceptance, Area, Equipment, HistoryChange, HistoryEntry, NewOrderInput,
-  Profile, WorkOrder, Worker, WorkerStatus,
+  Acceptance, Area, ChecklistItem, Equipment, FaultCode, HistoryChange, HistoryEntry,
+  NewOrderInput, Notification, Profile, WorkOrder, Worker, WorkerStatus,
 } from './types'
 
 const KEY = 'master-module-demo-v1'
@@ -16,6 +16,7 @@ interface DemoStore {
   orders: WorkOrder[]
   history: HistoryEntry[]
   acceptance: Acceptance[]
+  notifications: Notification[]
   counter: number
 }
 
@@ -39,7 +40,30 @@ function seed(): DemoStore {
     { id: uid(), userId: 'demo-worker-2', fullName: 'Иванов И.И.', specialty: 'Электрик', status: 'busy', rating: 4.2 },
     { id: uid(), userId: 'demo-worker-3', fullName: 'Петров П.П.', specialty: 'Механик', status: 'not_on_shift', rating: 3.9 },
   ]
-  return { profile: null, workers, areas, equipment, orders: [], history: [], acceptance: [], counter: 0 }
+  return { profile: null, workers, areas, equipment, orders: [], history: [], acceptance: [], notifications: [], counter: 0 }
+}
+
+// Справочник шифров неисправностей (ТЗ §19, §43) — тот же состав, что в 0003.
+const FAULT_CODES: FaultCode[] = [
+  { code: 'М-01', name: 'Механика: износ подшипника', description: 'Замена/ремонт подшипниковых узлов' },
+  { code: 'М-02', name: 'Механика: люфт вала', description: 'Устранение люфтов и перекосов валов' },
+  { code: 'М-03', name: 'Механика: вибрация', description: 'Балансировка, крепёж, демпфирование' },
+  { code: 'М-04', name: 'Механика: деформация корпуса', description: 'Трещины, сколы, правка корпусных деталей' },
+  { code: 'Э-01', name: 'Электрика: обрыв цепи', description: 'Поиск и устранение обрывов' },
+  { code: 'Э-02', name: 'Электрика: КЗ/замыкание', description: 'Изоляция, замена проводки' },
+  { code: 'Э-03', name: 'Электрика: двигатель', description: 'Ремонт/замена электродвигателя' },
+  { code: 'Э-04', name: 'Электрика: датчики/АСУ', description: 'Неисправности датчиков и автоматики' },
+  { code: 'Г-01', name: 'Гидравлика: утечка', description: 'Течь по соединениям и уплотнениям' },
+  { code: 'Г-02', name: 'Гидравлика: насос', description: 'Ремонт/замена насосного узла' },
+  { code: 'Г-03', name: 'Гидравлика: давление', description: 'Настройка редукторов, клапанов' },
+  { code: 'П-01', name: 'Пневматика: утечка воздуха', description: 'Течь пневмосоединений' },
+  { code: 'П-02', name: 'Пневматика: клапан/цилиндр', description: 'Замена пневмоэлементов' },
+  { code: 'С-01', name: 'Смазка: недостаток смазки', description: 'Восстановление подачи смазки' },
+  { code: 'С-02', name: 'Смазка: загрязнение масла', description: 'Замена масла, промывка' },
+]
+
+export function demoListFaultCodes(): FaultCode[] {
+  return FAULT_CODES
 }
 
 let store: DemoStore | null = null
@@ -131,8 +155,14 @@ export function demoCreateOrder(input: NewOrderInput, actorName: string): WorkOr
     comment: input.comment ?? null,
     normHours: input.normHours ?? null,
     workDone: null,
+    workerComment: null,
     materials: null,
+    materialsList: [],
     photosAfter: [],
+    pauseReason: null,
+    rejectReason: null,
+    pausedAt: null,
+    createdBy: s.profile?.id ?? null,
     createdAt: now,
     acceptedAt: null,
     startedAt: null,
@@ -181,6 +211,7 @@ const TRACKED_FIELDS: Array<[keyof WorkOrder, string]> = [
   ['materials', 'Материалы'],
   ['photos', 'Фото'],
   ['photosAfter', 'Фото «после»'],
+  ['materialsList', 'Материалы (позиции)'],
 ]
 
 export function demoUpdateOrder(
@@ -192,9 +223,8 @@ export function demoUpdateOrder(
   const s = load()
   const order = s.orders.find((o) => o.id === id)
   if (!order) return
-  // Метки времени (acceptedAt и т.п.) применяются молча, без отдельной записи в историю:
-  // статусные события уже логируются выше по статусу.
-  for (const f of ['startedAt', 'completedAt', 'acceptedAt', 'closedAt'] as const) {
+  // Метки времени и причины применяются молча: статусные события уже логируются.
+  for (const f of ['startedAt', 'completedAt', 'acceptedAt', 'closedAt', 'pausedAt', 'pauseReason', 'rejectReason'] as const) {
     if (f in patch) (order as unknown as Record<string, unknown>)[f] = patch[f] ?? null
   }
   const changes: HistoryChange[] = []
@@ -229,7 +259,7 @@ export function demoGetAcceptance(orderId: string): Acceptance | null {
 
 export function demoSaveAcceptance(
   orderId: string,
-  data: { aiScore: number; aiComment: string; masterDecision: Acceptance['masterDecision']; agreedWithAi: boolean; masterComment: string | null },
+  data: { aiScore: number; aiComment: string; masterDecision: Acceptance['masterDecision']; agreedWithAi: boolean; masterComment: string | null; checklist: ChecklistItem[] | null },
   actorName: string,
 ): void {
   const s = load()
@@ -250,6 +280,38 @@ export function demoSaveAcceptance(
 }
 
 /** Персональная статистика исполнителя по оборудованию (для Досье). */
+// ---------- Уведомления ----------
+
+export function demoCreateNotification(n: Omit<Notification, 'id' | 'isRead' | 'createdAt'>): void {
+  const s = load()
+  // Дедуп для системных (просрочка/срок): одно активное уведомление на наряд.
+  if (n.type === 'OVERDUE' || n.type === 'DEADLINE_APPROACH') {
+    const dup = s.notifications.find((x) => x.type === n.type && x.workOrderId === n.workOrderId)
+    if (dup) return
+  }
+  s.notifications.unshift({
+    ...n,
+    id: uid(),
+    isRead: false,
+    createdAt: new Date().toISOString(),
+  })
+  save()
+}
+
+export function demoListNotifications(userId: string): Notification[] {
+  return load()
+    .notifications.filter((n) => n.userId === userId)
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+}
+
+export function demoMarkNotificationsRead(userId: string): void {
+  const s = load()
+  for (const n of s.notifications) {
+    if (n.userId === userId) n.isRead = true
+  }
+  save()
+}
+
 export function demoWorkerEquipmentStats(
   workerId: string,
 ): Array<{ equipment: Equipment; count: number; avgScore: number | null }> {

@@ -1,7 +1,7 @@
 // ИИ-заглушки (моки) первой итерации: шифр неисправности, подсказка
 // исполнителя и вердикт при приёмке. Позже заменяются реальной моделью.
 
-import type { AiVerdict, WorkOrder, Worker } from './types'
+import type { AiVerdict, ChecklistItem, WorkOrder, Worker } from './types'
 
 // ---------- Шифр неисправности: М/Э/Г/П/С + номер ----------
 
@@ -83,68 +83,79 @@ export function suggestWorker(workers: Worker[], orders: WorkOrder[]): WorkerSug
   return { worker: best, reason: `ИИ-подсказка: ${best.fullName} — ${parts.join(', ')}.` }
 }
 
-// ---------- Вердикт ИИ при приёмке ----------
+// ---------- Вердикт ИИ при приёмке (чек-лист ТЗ §31/§49) ----------
 
 export function aiVerdict(order: WorkOrder): AiVerdict {
-  const notes: string[] = []
-  let score = 3
+  const completed = order.completedAt ? new Date(order.completedAt) : null
+  const deadline = new Date(order.deadline)
 
-  // Полнота закрытия.
-  const filled = [order.workDone, order.materials, order.faultCode].filter(
-    (v) => v && v.trim().length > 0,
-  ).length
-  const hasAfter = order.photosAfter.length > 0
-  score += filled >= 3 ? 1 : filled <= 1 ? -1 : 0
-  if (!hasAfter) {
-    score -= 1
-    notes.push('нет фото «после» — приложите подтверждение результата.')
-  }
-  if (!order.workDone) notes.push('не заполнено описание выполненных работ.')
+  // 1. Полнота закрытия.
+  const completenessOk = Boolean(
+    order.workDone?.trim() && order.faultCode && order.photosAfter.length >= 1,
+  )
+  const completenessNote = !order.workDone
+    ? 'не заполнено описание выполненных работ'
+    : !order.faultCode
+      ? 'не выбран шифр неисправности'
+      : order.photosAfter.length === 0
+        ? 'нет фото «после»'
+        : 'все обязательные поля заполнены'
 
-  // Соответствие работ проблеме (упрощённо: пересечение слов).
-  if (order.workDone) {
-    const overlap = words(order.description).filter((w) => words(order.workDone as string).includes(w))
-    if (overlap.length >= 2) {
-      notes.push(`описание работ соответствует проблеме (совпадения: ${overlap.slice(0, 3).join(', ')}).`)
-    } else {
-      notes.push('описание работ слабо пересекается с исходной проблемой — проверьте вручную.')
-      score -= 1
-    }
-  }
+  // 2. Соответствие работ проблеме (пересечение слов).
+  const overlap = words(order.description).filter((w) => words(order.workDone ?? '').includes(w))
+  const problemOk = Boolean(order.workDone) && overlap.length >= 2
+  const problemNote = problemOk
+    ? `совпадения: ${overlap.slice(0, 3).join(', ')}`
+    : 'описание работ слабо пересекается с исходной проблемой'
 
-  // Логичность материалов.
-  if (order.materials && order.materials.trim().length > 60) {
-    notes.push('списано много материалов — проверьте расход.')
-    score -= 1
-  } else if (order.materials) {
-    notes.push('материалы в разумных пределах.')
-  }
+  // 3. Логичность материалов.
+  const matLen = (order.materials ?? '').trim().length
+  const materialOk = matLen > 0 && matLen <= 120
+  const materialNote = matLen === 0
+    ? 'материалы не указаны'
+    : matLen > 120
+      ? 'списано много материалов — проверьте расход'
+      : 'материалы в разумных пределах'
 
-  // Время: факт против срока и норматива.
-  if (order.completedAt) {
-    const done = new Date(order.completedAt)
-    const deadline = new Date(order.deadline)
-    if (done > deadline) {
-      notes.push('работа завершена позже срока.')
-      score -= 1
-    } else {
-      notes.push('срок соблюдён.')
-      score += 1
-    }
-    if (order.normHours && order.startedAt) {
-      const factH = (done.getTime() - new Date(order.startedAt).getTime()) / 3_600_000
-      if (factH <= order.normHours) notes.push(`уложился в норматив (факт ${factH.toFixed(1)} ч из ${order.normHours} ч).`)
-      else {
-        notes.push(`превышен норматив: ${factH.toFixed(1)} ч из ${order.normHours} ч.`)
-        score -= 1
-      }
-    }
+  // 4. Время.
+  let timeOk = false
+  let timeNote = 'время выполнения не зафиксировано'
+  if (completed) {
+    const factH = order.startedAt
+      ? (completed.getTime() - new Date(order.startedAt).getTime()) / 3_600_000
+      : null
+    const beforeDeadline = completed <= deadline
+    const withinNorm = order.normHours == null || factH == null || factH <= order.normHours
+    timeOk = beforeDeadline && withinNorm
+    timeNote = [
+      beforeDeadline ? 'срок соблюдён' : 'завершено позже срока',
+      factH != null && order.normHours != null
+        ? `факт ${factH.toFixed(1)} ч из ${order.normHours} ч`
+        : null,
+    ].filter(Boolean)!.join(', ')
   }
 
-  score = Math.max(1, Math.min(5, score))
-  const head = `Оценка ИИ: ${score}/5.`
-  const body = notes.length ? ` ${notes.join(' ')}` : ' Замечаний не найдено.'
-  return { score, comment: head + body }
+  // 5. Качество по фото (мок: наличие фото после).
+  const photoOk = order.photosAfter.length >= 1
+  const photoNote = photoOk
+    ? `фото «после»: ${order.photosAfter.length} шт.`
+    : 'нет фото после выполнения'
+
+  const checklist: ChecklistItem[] = [
+    { code: 'COMPLETENESS', label: 'Полнота закрытия', passed: completenessOk, comment: completenessNote },
+    { code: 'PROBLEM_MATCH', label: 'Соответствие работ проблеме', passed: problemOk, comment: problemNote },
+    { code: 'MATERIAL_LOGIC', label: 'Логичность списанных материалов', passed: materialOk, comment: materialNote },
+    { code: 'TIME_NORM', label: 'Соблюдение временного норматива', passed: timeOk, comment: timeNote },
+    { code: 'PHOTO_QUALITY', label: 'Качество по фото', passed: photoOk, comment: photoNote },
+  ]
+
+  const passed = checklist.filter((c) => c.passed).length
+  const score = Math.max(1, Math.min(5, passed))
+  const failed = checklist.filter((c) => !c.passed).map((c) => c.label.toLowerCase())
+  const comment =
+    `Оценка ИИ: ${score}/5. Пройдено критериев: ${passed}/5.` +
+    (failed.length ? ` Требует внимания: ${failed.join(', ')}.` : ' Замечаний не найдено.')
+  return { score, comment, checklist }
 }
 
 function words(s: string): string[] {
