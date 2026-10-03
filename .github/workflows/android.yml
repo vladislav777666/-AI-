@@ -1,4 +1,4 @@
-﻿name: Android APK
+name: Android APK
 
 on:
   push:
@@ -45,28 +45,41 @@ jobs:
         run: npx cap sync android
 
       - name: Build debug APK
+        id: build_gradle
         run: |
           set -o pipefail
           cd android
           ./gradlew assembleDebug --no-daemon 2>&1 | tee gradle-build.log
 
       - name: Report Gradle error
-        if: failure()
+        if: steps.build_gradle.outcome == 'failure'
         run: |
           LOG=android/gradle-build.log
+
           {
             echo "### Gradle failure"
             echo '```'
-            if grep -qi "what went wrong" "$LOG"; then
-              awk 'BEGIN{IGNORECASE=1} /What went wrong/{f=1} f{print} /Try:/{if(f) exit}' "$LOG"
+
+            if [ -f "$LOG" ]; then
+              if grep -qi "what went wrong" "$LOG"; then
+                awk 'BEGIN{IGNORECASE=1} /What went wrong/{f=1} f{print} /Try:/{if(f) exit}' "$LOG"
+              else
+                tail -n 60 "$LOG"
+              fi
             else
-              tail -n 60 "$LOG"
+              echo "Gradle log was not created."
             fi
+
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          REASON=$(grep -i -A 6 "what went wrong" "$LOG" | head -8 | tr '\n' ' ' | cut -c1-400)
-          [ -z "$REASON" ] && REASON=$(tail -n 20 "$LOG" | tr '\n' ' ' | cut -c1-400)
-          echo "::error title=Gradle build failed::$REASON"
+
+          if [ -f "$LOG" ]; then
+            REASON=$(grep -i -A 6 "what went wrong" "$LOG" | head -8 | tr '\n' ' ' | cut -c1-400)
+            [ -z "$REASON" ] && REASON=$(tail -n 20 "$LOG" | tr '\n' ' ' | cut -c1-400)
+            echo "::error title=Gradle build failed::$REASON"
+          else
+            echo "::error title=Gradle build failed::Gradle log was not created."
+          fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
