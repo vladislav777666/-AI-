@@ -30,12 +30,8 @@ jobs:
         run: npm ci
 
       - name: Build web app
+        # VITE_SUPABASE_* берутся из .env.production (публичные ключи).
         run: npm run build
-        env:
-          # .env.production уже содержит VITE_SUPABASE_*; можно переопределить
-          # секретами репозитория, если ключи понадобится сменить без коммита.
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
 
       - name: Sync Capacitor
         run: npx cap sync android
