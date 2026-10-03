@@ -23,10 +23,10 @@ dist-ssr
 *.sln
 *.sw?
 
-# Env
+# Env (Infisical: значения приходят из infisical run, файлы на диск не кладём)
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 # Capacitor
 android/app/src/main/assets/public

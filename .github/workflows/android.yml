@@ -1,4 +1,4 @@
-name: Android APK
+﻿name: Android APK
 
 on:
   push:
@@ -29,8 +29,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Fetch secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: "universal"
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ vars.INFISICAL_PROJECT_SLUG }}
+          env-slug: "prod"
+
       - name: Build web app
-        # VITE_SUPABASE_* берутся из .env.production (публичные ключи).
         run: npm run build
 
       - name: Sync Capacitor
