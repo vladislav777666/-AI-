@@ -88,3 +88,18 @@ jobs:
           path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Build release APK
+        run: |
+          set -o pipefail
+          cd android
+          ./gradlew assembleRelease --no-daemon 2>&1 | tee gradle-release-build.log
+
+      - name: Upload release APK artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
