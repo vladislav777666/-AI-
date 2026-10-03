@@ -31,6 +31,11 @@ export async function loginWithRole(role: Role, password: string): Promise<boole
   })
 
   if (error) {
+    // PGRST202: RPC ещё не создан (миграция не выполнена) → работаем на заглушке.
+    if (error.code === 'PGRST202') {
+      console.warn('[auth] login_with_role not found in Supabase, using mock login. Run supabase/migrations/0001_auth_by_role.sql.')
+      return mockLogin(password)
+    }
     throw new Error(error.message)
   }
 
