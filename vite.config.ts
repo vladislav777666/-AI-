@@ -9,39 +9,18 @@ import tailwindcss from '@tailwindcss/vite'
 // Если в проекте его нет (или меняем локальный index.css), явно указываем
 // путь до src/index.css. Это устраняет ENOENT при запуске tailwindcss v4
 // на проекте с Vite 8 и без node_modules.
+//
+// В нынешней версии плагина (4.3.x) тип PluginOptions = { optimize? } не
+// содержит content/theme. Передача этих полей вызывает TS2530/TS2353
+// (unknown properties) и ENOENT при генерации/серверах. Поэтому мы оставляем
+// вызов без опций; тему и содержимое выносим в обычный конфиг
+// tailwindcss (создаём src/tailwind.config.ts), который подключается
+// @import "tailwindcss" в src/index.css.
 
 export default defineConfig({
   plugins: [
     react(),
-    tailwindcss({
-      // Путь до корневого CSS. Если таких нет, применяем src/index.css.
-      config: {
-        content: {
-          files: [
-            'src/**/*.tsx',
-            'src/**/*.ts',
-            'src/**/*.jsx',
-            'src/**/*.js',
-          ],
-        },
-        theme: {
-          extend: {
-            fontFamily: {
-              sans: ['Inter', 'Segoe UI', 'system-ui', '-apple-system', 'sans-serif'],
-            },
-          },
-        },
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        safelist: [],
-        // Path to the CSS file to process. If not set, @tailwindcss/node
-        // looks for node_modules/tailwindcss/index.css; we override that.
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        // @ts-expect-error - path is optional for the plugin
-        process: {
-          main: ['src/index.css'],
-        },
-      },
-    }),
+    tailwindcss({ optimize: true }),
   ],
 })
 

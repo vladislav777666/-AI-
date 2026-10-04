@@ -106,9 +106,10 @@ export default function OrderDetail({ data, orderId }: { data: MasterData; order
           aiComment: verdict.comment,
           masterDecision: finalDecision,
           agreedWithAi: agreeAi ?? true,
-          masterComment: masterComment.trim() || null,
-        },
-        actor,
+        masterComment: masterComment.trim() || null,
+        checklist: null,
+      },
+      actor,
       )
       if (finalDecision === 'rework') {
         await db.setOrderStatus(order.id, 'in_work', actor)
