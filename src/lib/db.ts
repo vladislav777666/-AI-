@@ -1,78 +1,317 @@
 // Единый слой данных. Если ключи Supabase заданы — работаем с Supabase,
 // иначе — с localStorage-демо (см. demo.ts). Интерфейс один и тот же.
+//
+// Персистентность («везде и всегда»):
+//  - все ЗАПИСИ (Мастер, Исполнитель, веб-админ) идут через persist():
+//    при отсутствии сети операция уходит в офлайн-очередь и применяется
+//    к БД при появлении сети (db.runQueuedOp);
+//  - все ЧТЕНИЯ идут через readThrough(): кэш последнего успешного ответа
+//    отдаётся, пока сеть недоступна;
+//  - демо-режим (без ключей) не трогает очередь и кэш.
 
+import { cacheGet, persist, readThrough, uid } from './offline'
 import { isSupabaseConfigured, supabase } from './supabase'
 import * as demo from './demo'
+import { isNetworkError, type DbFnName, type SyncOp } from './sync'
 import type {
   Acceptance, Area, ChecklistItem, Equipment, FaultCode, HistoryChange, HistoryEntry,
-  NewOrderInput, Notification, Profile, WorkOrder, Worker, WorkerStatus,
+  Material, NewOrderInput, Notification, Profile, WorkOrder, Worker, WorkerStatus,
+  WorkType,
 } from './types'
 import type { Acceptance as DbAcceptance } from './types'
 
 // ---------- Профиль ----------
 
 export async function getProfile(): Promise<Profile | null> {
-  if (!isSupabaseConfigured || !supabase) return demo.demoGetProfile()
-  const { data: userData } = await supabase.auth.getUser()
-  if (!userData.user) return null
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('id, role, full_name')
-    .eq('id', userData.user.id)
-    .maybeSingle()
-  if (error) throw new Error(error.message)
-  if (!data) return null
-  return { id: data.id, role: data.role, fullName: data.full_name ?? '' }
+  const sb = supabase
+  if (!isSupabaseConfigured || !sb) return demo.demoGetProfile()
+  return readThrough('profile', async () => {
+    const { data: userData } = await sb.auth.getUser()
+    if (!userData.user) return null
+    const { data, error } = await sb
+      .from('profiles')
+      .select('id, role, full_name')
+      .eq('id', userData.user.id)
+      .maybeSingle()
+    if (error) throw new Error(error.message)
+    if (!data) return null
+    return { id: data.id, role: data.role, fullName: data.full_name ?? '' }
+  })
 }
 
 // ---------- Исполнители ----------
 
 export async function listWorkers(): Promise<Worker[]> {
-  if (!isSupabaseConfigured || !supabase) return demo.demoListWorkers()
-  const { data, error } = await supabase
-    .from('workers')
-    .select('id, user_id, full_name, specialty, status, rating')
-    .order('full_name')
+  const sb = supabase
+  if (!isSupabaseConfigured || !sb) return demo.demoListWorkers()
+  return readThrough('workers', async () => {
+    const { data, error } = await sb
+      .from('workers')
+      .select('id, user_id, full_name, specialty, status, rating, rank, brigade, area_id')
+      .order('full_name')
+    if (error) throw new Error(error.message)
+    return (data ?? []).map((w) => ({
+      id: w.id, userId: w.user_id, fullName: w.full_name, specialty: w.specialty,
+      rank: w.rank, brigade: w.brigade, areaId: w.area_id,
+      status: w.status, rating: Number(w.rating),
+    }))
+  })
+}
+
+/** Карточка сотрудника (ТЗ §2.4): Имя, специальность и разряд, бригада, участок. */
+export interface WorkerCardInput {
+  fullName: string
+  specialty: string
+  rank: string | null
+  brigade: string | null
+  areaId: string | null
+}
+
+/** Добавление сотрудника администратором — до регистрации аккаунта (ТЗ §2.4). */
+export async function createWorker(input: WorkerCardInput): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return demo.demoCreateWorker(input)
+  const id = uid()
+  return persist(
+    { fn: 'createWorker', args: [input, id] },
+    () => createWorkerDirect(input, id),
+    () => undefined,
+  )
+}
+
+async function createWorkerDirect(input: WorkerCardInput, id: string): Promise<void> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  const { error } = await sb.from('workers').upsert({
+    id,
+    full_name: input.fullName,
+    specialty: input.specialty,
+    rank: input.rank,
+    brigade: input.brigade,
+    area_id: input.areaId,
+  }, { onConflict: 'id', ignoreDuplicates: true })
   if (error) throw new Error(error.message)
-  return (data ?? []).map((w) => ({
-    id: w.id, userId: w.user_id, fullName: w.full_name, specialty: w.specialty,
-    status: w.status, rating: Number(w.rating),
-  }))
+}
+
+/** Редактирование карточки сотрудника (ТЗ §2.4). */
+export async function updateWorker(workerId: string, patch: Partial<WorkerCardInput>): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return demo.demoUpdateWorker(workerId, patch)
+  return persist(
+    { fn: 'updateWorker', args: [workerId, patch] },
+    () => updateWorkerDirect(workerId, patch),
+    () => undefined,
+  )
+}
+
+async function updateWorkerDirect(workerId: string, patch: Partial<WorkerCardInput>): Promise<void> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  const col: Record<keyof WorkerCardInput, string> = {
+    fullName: 'full_name', specialty: 'specialty', rank: 'rank',
+    brigade: 'brigade', areaId: 'area_id',
+  }
+  const update: Record<string, unknown> = {}
+  for (const [key, column] of Object.entries(col)) {
+    if (key in patch) update[column] = (patch as Record<string, unknown>)[key]
+  }
+  if (Object.keys(update).length === 0) return
+  const { error } = await sb.from('workers').update(update).eq('id', workerId)
+  if (error) throw new Error(error.message)
 }
 
 export async function updateWorkerStatus(workerId: string, status: WorkerStatus): Promise<void> {
   if (!isSupabaseConfigured || !supabase) return demo.demoUpdateWorkerStatus(workerId, status)
-  const { error } = await supabase.from('workers').update({ status }).eq('id', workerId)
+  return persist(
+    { fn: 'updateWorkerStatus', args: [workerId, status] },
+    () => updateWorkerStatusDirect(workerId, status),
+    () => undefined,
+  )
+}
+
+async function updateWorkerStatusDirect(workerId: string, status: WorkerStatus): Promise<void> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  const { error } = await sb.from('workers').update({ status }).eq('id', workerId)
   if (error) throw new Error(error.message)
 }
 
 // ---------- Справочники ----------
 
 export async function listAreas(): Promise<Area[]> {
-  if (!isSupabaseConfigured || !supabase) return demo.demoListAreas()
-  const { data, error } = await supabase.from('areas').select('id, name').order('name')
+  const sb = supabase
+  if (!isSupabaseConfigured || !sb) return demo.demoListAreas()
+  return readThrough('areas', async () => {
+    const { data, error } = await sb.from('areas').select('id, name').order('name')
+    if (error) throw new Error(error.message)
+    return data ?? []
+  })
+}
+
+/** Добавление участка (ТЗ §2.1) — id генерируется клиентски, возврат записи для привязок. */
+export async function createArea(name: string): Promise<Area> {
+  if (!isSupabaseConfigured || !supabase) return demo.demoCreateArea(name)
+  const id = uid()
+  return persist(
+    { fn: 'createArea', args: [name, id] },
+    () => createAreaDirect(name, id),
+    () => ({ id, name }),
+  )
+}
+
+async function createAreaDirect(name: string, id: string): Promise<Area> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  const { data, error } = await sb.from('areas')
+    .upsert({ id, name }, { onConflict: 'id', ignoreDuplicates: true })
+    .select('id, name')
+    .maybeSingle()
   if (error) throw new Error(error.message)
-  return data ?? []
+  return data ?? { id, name }
+}
+
+/** Переименование участка (ТЗ §2.1). */
+export async function updateArea(id: string, name: string): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return demo.demoUpdateArea(id, name)
+  return persist(
+    { fn: 'updateArea', args: [id, name] },
+    () => updateAreaDirect(id, name),
+    () => undefined,
+  )
+}
+
+async function updateAreaDirect(id: string, name: string): Promise<void> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  const { error } = await sb.from('areas').update({ name }).eq('id', id)
+  if (error) throw new Error(error.message)
 }
 
 export async function listEquipment(): Promise<Equipment[]> {
-  if (!isSupabaseConfigured || !supabase) return demo.demoListEquipment()
-  const { data, error } = await supabase
-    .from('equipment').select('id, area_id, name').order('name')
+  const sb = supabase
+  if (!isSupabaseConfigured || !sb) return demo.demoListEquipment()
+  return readThrough('equipment', async () => {
+    const { data, error } = await sb
+      .from('equipment').select('id, area_id, name').order('name')
+    if (error) throw new Error(error.message)
+    return (data ?? []).map((e) => ({ id: e.id, areaId: e.area_id ?? '', name: e.name }))
+  })
+}
+
+/** Добавление оборудования: Название + Участок (ТЗ §2.3). */
+export async function createEquipment(name: string, areaId: string): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return demo.demoCreateEquipment(name, areaId)
+  const id = uid()
+  return persist(
+    { fn: 'createEquipment', args: [name, areaId, id] },
+    () => createEquipmentDirect(name, areaId, id),
+    () => undefined,
+  )
+}
+
+async function createEquipmentDirect(name: string, areaId: string, id: string): Promise<void> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  const { error } = await sb.from('equipment')
+    .upsert({ id, name, area_id: areaId }, { onConflict: 'id', ignoreDuplicates: true })
   if (error) throw new Error(error.message)
-  return (data ?? []).map((e) => ({ id: e.id, areaId: e.area_id, name: e.name }))
+}
+
+/** Смена участка закрепления оборудования (ТЗ §2.1). В 0002 area_id NOT NULL. */
+export async function updateEquipment(id: string, areaId: string): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return demo.demoUpdateEquipment(id, areaId)
+  return persist(
+    { fn: 'updateEquipment', args: [id, areaId] },
+    () => updateEquipmentDirect(id, areaId),
+    () => undefined,
+  )
+}
+
+async function updateEquipmentDirect(id: string, areaId: string): Promise<void> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  const { error } = await sb.from('equipment').update({ area_id: areaId }).eq('id', id)
+  if (error) throw new Error(error.message)
+}
+
+// ---------- Материалы и запчасти (ТЗ §2.2) ----------
+
+export async function listMaterials(): Promise<Material[]> {
+  const sb = supabase
+  if (!isSupabaseConfigured || !sb) return demo.demoListMaterials()
+  return readThrough('materials', async () => {
+    const { data, error } = await sb
+      .from('materials')
+      .select('id, name, qty, unit, area_id')
+      .order('name')
+    if (error) throw new Error(error.message)
+    return (data ?? []).map((m) => ({
+      id: m.id, name: m.name, qty: Number(m.qty), unit: m.unit, areaId: m.area_id,
+    }))
+  })
+}
+
+/** Создание/обновление позиции справочника материалов (ТЗ §2.2). */
+export async function saveMaterial(input: {
+  id?: string
+  name: string
+  qty: number
+  unit: string
+  areaId: string | null
+}): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return demo.demoSaveMaterial(input)
+  const isUpdate = Boolean(input.id)
+  const row = { name: input.name, qty: input.qty, unit: input.unit, areaId: input.areaId, id: input.id ?? uid() }
+  return persist(
+    { fn: 'saveMaterial', args: [row, isUpdate] },
+    () => saveMaterialDirect(row, isUpdate),
+    () => undefined,
+  )
+}
+
+async function saveMaterialDirect(row: {
+  id: string; name: string; qty: number; unit: string; areaId: string | null
+}, isUpdate: boolean): Promise<void> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  const value = { name: row.name, qty: row.qty, unit: row.unit, area_id: row.areaId }
+  if (isUpdate) {
+    const { error } = await sb.from('materials').update(value).eq('id', row.id)
+    if (error) throw new Error(error.message)
+  } else {
+    const { error } = await sb.from('materials')
+      .upsert({ id: row.id, ...value }, { onConflict: 'id', ignoreDuplicates: true })
+    if (error) throw new Error(error.message)
+  }
+}
+
+export async function deleteMaterial(id: string): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return demo.demoDeleteMaterial(id)
+  return persist(
+    { fn: 'deleteMaterial', args: [id] },
+    () => deleteMaterialDirect(id),
+    () => undefined,
+  )
+}
+
+async function deleteMaterialDirect(id: string): Promise<void> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  const { error } = await sb.from('materials').delete().eq('id', id)
+  if (error) throw new Error(error.message)
 }
 
 // ---------- Наряды ----------
 
 export async function listOrders(): Promise<WorkOrder[]> {
-  if (!isSupabaseConfigured || !supabase) return demo.demoListOrders()
-  const { data, error } = await supabase
-    .from('work_orders')
-    .select('*')
-    .order('created_at', { ascending: false })
-  if (error) throw new Error(error.message)
-  return (data ?? []).map(mapOrder)
+  const sb = supabase
+  if (!isSupabaseConfigured || !sb) return demo.demoListOrders()
+  return readThrough('orders', async () => {
+    const { data, error } = await sb
+      .from('work_orders')
+      .select('*')
+      .order('created_at', { ascending: false })
+    if (error) throw new Error(error.message)
+    return (data ?? []).map(mapOrder)
+  })
 }
 
 function mapOrder(r: Record<string, unknown>): WorkOrder {
@@ -108,15 +347,86 @@ function mapOrder(r: Record<string, unknown>): WorkOrder {
   }
 }
 
-export async function createOrder(input: NewOrderInput, actorName: string): Promise<WorkOrder> {
-  let order: WorkOrder
+/** Клиентский номер для офлайн-выдачи (серверный seq недоступен без сети). */
+function genOrderNumber(): string {
+  const now = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  const day = `${String(now.getFullYear()).slice(2)}${p(now.getMonth() + 1)}${p(now.getDate())}`
+  return `Н-${day}-${String(now.getTime() % 1_000_000).padStart(6, '0')}`
+}
+
+function optimisticOrder(input: NewOrderInput, id: string, number: string): WorkOrder {
+  const now = new Date().toISOString()
+  return {
+    id,
+    number,
+    workType: input.workType,
+    description: input.description,
+    areaId: input.areaId,
+    equipmentId: input.equipmentId,
+    workerId: input.workerId,
+    deadline: input.deadline,
+    priority: input.priority,
+    status: 'issued',
+    faultCode: input.faultCode ?? null,
+    photos: input.photos,
+    comment: input.comment ?? null,
+    normHours: input.normHours ?? null,
+    workDone: null,
+    workerComment: null,
+    materials: null,
+    materialsList: [],
+    photosAfter: [],
+    pauseReason: null,
+    rejectReason: null,
+    pausedAt: null,
+    createdBy: null,
+    createdAt: now,
+    acceptedAt: null,
+    startedAt: null,
+    completedAt: null,
+    closedAt: null,
+  }
+}
+
+export async function createOrder(
+  input: NewOrderInput,
+  actorName: string,
+  opts?: { id?: string; number?: string },
+): Promise<WorkOrder> {
   if (!isSupabaseConfigured || !supabase) {
-    order = demo.demoCreateOrder(input, actorName)
-  } else {
-    const { data: userData } = await supabase.auth.getUser()
-    const { data, error } = await supabase
-      .from('work_orders')
-      .insert({
+    const order = demo.demoCreateOrder(input, actorName)
+    try {
+      const target = await workerUserId(input.workerId)
+      if (target) await notifyNewOrder(target, order)
+    } catch {
+      // уведомление не должно ломать создание наряда
+    }
+    return order
+  }
+  const id = opts?.id ?? uid()
+  const number = opts?.number ?? ''
+  return persist(
+    { fn: 'createOrder', args: [input, actorName, { id, number }] },
+    () => createOrderDirect(input, actorName, id, number),
+    () => optimisticOrder(input, id, number || genOrderNumber()),
+  )
+}
+
+async function createOrderDirect(
+  input: NewOrderInput,
+  actorName: string,
+  id: string,
+  number: string,
+): Promise<WorkOrder> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  const { data: userData } = await sb.auth.getUser()
+  const { data, error } = await sb
+    .from('work_orders')
+    .upsert({
+      id,
+      number,
       work_type: input.workType,
       description: input.description,
       area_id: input.areaId,
@@ -129,39 +439,99 @@ export async function createOrder(input: NewOrderInput, actorName: string): Prom
       photos: input.photos,
       comment: input.comment ?? null,
       created_by: userData.user?.id ?? null,
-    })
+    }, { onConflict: 'id', ignoreDuplicates: true })
     .select('*')
-    .single()
-    if (error) throw new Error(error.message)
-    order = mapOrder(data)
-  }
+    .maybeSingle()
+  if (error) throw new Error(error.message)
+  // Повтор после успешного применения (очередь) вернёт null — берём строку из БД.
+  const order = data ? mapOrder(data) : await getOrderSupabase(id)
+  if (!order) throw new Error('Наряд не записан в БД (конфликт номера) — повторите выдачу')
+  void actorName
   try {
     const target = await workerUserId(input.workerId)
-    if (target) {
-      await createNotification({
-        userId: target,
-        workOrderId: order.id,
-        type: 'NEW_ORDER',
-        title: 'Новый наряд',
-        message: `Вам назначен наряд ${order.number}. Срок: ${new Date(order.deadline).toLocaleString('ru-RU')}.`,
-      })
-    }
+    if (target) await notifyNewOrder(target, order)
   } catch {
     // уведомление не должно ломать создание наряда
   }
   return order
 }
 
-/** Справочник шифров неисправностей (ТЗ §19). */
+async function notifyNewOrder(userId: string, order: WorkOrder): Promise<void> {
+  await createNotification({
+    userId,
+    workOrderId: order.id,
+    type: 'NEW_ORDER',
+    title: 'Новый наряд',
+    message: `Вам назначен наряд ${order.number}. Срок: ${new Date(order.deadline).toLocaleString('ru-RU')}.`,
+  })
+}
+
+/** Справочник шифров неисправностей (ТЗ §19, §2.5). */
 export async function listFaultCodes(): Promise<FaultCode[]> {
-  if (!isSupabaseConfigured || !supabase) return demo.demoListFaultCodes()
-  const { data, error } = await supabase
-    .from('fault_codes')
-    .select('code, name, description')
-    .eq('active', true)
-    .order('sort_order')
+  const sb = supabase
+  if (!isSupabaseConfigured || !sb) return demo.demoListFaultCodes()
+  return readThrough('faultCodes', async () => {
+    const { data, error } = await sb
+      .from('fault_codes')
+      .select('code, name, description, norm_hours, material_norm, work_type')
+      .eq('active', true)
+      .order('sort_order')
+    if (error) throw new Error(error.message)
+    return (data ?? []).map((f) => ({
+      code: f.code, name: f.name, description: f.description,
+      normHours: f.norm_hours != null ? Number(f.norm_hours) : null,
+      materialNorm: f.material_norm,
+      workType: (f.work_type as WorkType | null) ?? null,
+    }))
+  })
+}
+
+/** Добавление шифра неисправности (ТЗ §2.5). */
+export async function createFaultCode(input: FaultCode): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return demo.demoCreateFaultCode(input)
+  return persist(
+    { fn: 'createFaultCode', args: [input] },
+    () => createFaultCodeDirect(input),
+    () => undefined,
+  )
+}
+
+async function createFaultCodeDirect(input: FaultCode): Promise<void> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  const { error } = await sb.from('fault_codes').upsert({
+    code: input.code,
+    name: input.name,
+    description: input.description,
+    norm_hours: input.normHours,
+    material_norm: input.materialNorm,
+    work_type: input.workType,
+  }, { onConflict: 'code', ignoreDuplicates: true })
   if (error) throw new Error(error.message)
-  return data ?? []
+}
+
+/** Редактирование карточки шифра (ТЗ §2.5). */
+export async function updateFaultCode(code: string, patch: Partial<FaultCode>): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return demo.demoUpdateFaultCode(code, patch)
+  return persist(
+    { fn: 'updateFaultCode', args: [code, patch] },
+    () => updateFaultCodeDirect(code, patch),
+    () => undefined,
+  )
+}
+
+async function updateFaultCodeDirect(code: string, patch: Partial<FaultCode>): Promise<void> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  const update: Record<string, unknown> = {}
+  if ('name' in patch) update.name = patch.name
+  if ('description' in patch) update.description = patch.description
+  if ('normHours' in patch) update.norm_hours = patch.normHours
+  if ('materialNorm' in patch) update.material_norm = patch.materialNorm
+  if ('workType' in patch) update.work_type = patch.workType
+  if (Object.keys(update).length === 0) return
+  const { error } = await sb.from('fault_codes').update(update).eq('code', code)
+  if (error) throw new Error(error.message)
 }
 
 /**
@@ -177,6 +547,21 @@ export async function updateOrder(
   if (!isSupabaseConfigured || !supabase) {
     return demo.demoUpdateOrder(id, patch as Partial<WorkOrder>, actorName, action)
   }
+  return persist(
+    { fn: 'updateOrder', args: [id, patch, actorName, action] },
+    () => updateOrderDirect(id, patch as Partial<WorkOrder>, actorName, action),
+    () => undefined,
+  )
+}
+
+async function updateOrderDirect(
+  id: string,
+  patch: Partial<WorkOrder>,
+  actorName: string,
+  action: string,
+): Promise<void> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
   const before = await getOrderSupabase(id)
   const col: Record<string, string> = {
     description: 'description', workType: 'work_type', areaId: 'area_id',
@@ -213,7 +598,7 @@ export async function updateOrder(
   }
 
   if (Object.keys(update).length > 0) {
-    const { error } = await supabase.from('work_orders').update(update).eq('id', id)
+    const { error } = await sb.from('work_orders').update(update).eq('id', id)
     if (error) throw new Error(error.message)
   }
   if (changes.length > 0) {
@@ -228,8 +613,9 @@ function stringify(v: unknown): string | null {
 }
 
 async function getOrderSupabase(id: string): Promise<WorkOrder | null> {
-  if (!supabase) return null
-  const { data, error } = await supabase.from('work_orders').select('*').eq('id', id).maybeSingle()
+  const sb = supabase
+  if (!sb) return null
+  const { data, error } = await sb.from('work_orders').select('*').eq('id', id).maybeSingle()
   if (error) throw new Error(error.message)
   return data ? mapOrder(data) : null
 }
@@ -238,7 +624,17 @@ export async function getOrder(id: string): Promise<WorkOrder | null> {
   if (!isSupabaseConfigured || !supabase) {
     return demo.demoListOrders().find((o) => o.id === id) ?? null
   }
-  return getOrderSupabase(id)
+  try {
+    return await getOrderSupabase(id)
+  } catch (err) {
+    // Офлайн: отдаём наряд из кэша списка.
+    if (isNetworkError(err)) {
+      const cached = cacheGet<WorkOrder[]>('orders')
+      const hit = cached?.find((o) => o.id === id) ?? null
+      if (hit) return hit
+    }
+    throw err
+  }
 }
 
 const STATUS_TS: Partial<Record<WorkOrder['status'], keyof WorkOrder>> = {
@@ -248,22 +644,16 @@ const STATUS_TS: Partial<Record<WorkOrder['status'], keyof WorkOrder>> = {
   closed: 'closedAt',
 }
 
-/** Смена статуса (+метки времени, причины). Историю пишет триггер/демо-лог. */
-export async function setOrderStatus(
-  id: string,
-  status: WorkOrder['status'],
-  actorName: string,
-  opts?: { reason?: string },
-): Promise<void> {
-  // Правило одной активной задачи (ТЗ §6).
-  if (status === 'in_work') {
-    const all = await listOrders()
-    const target = all.find((o) => o.id === id)
-    if (target && all.some((o) => o.id !== id && o.workerId === target.workerId && o.status === 'in_work')) {
-      throw new Error('Одна активная задача: сначала приостановите или завершите текущий наряд (ТЗ §6).')
-    }
+/** Правило одной активной задачи (ТЗ §6). */
+async function assertSingleActive(id: string): Promise<void> {
+  const all = await listOrders()
+  const target = all.find((o) => o.id === id)
+  if (target && all.some((o) => o.id !== id && o.workerId === target.workerId && o.status === 'in_work')) {
+    throw new Error('Одна активная задача: сначала приостановите или завершите текущий наряд (ТЗ §6).')
   }
+}
 
+function statusPatch(status: WorkOrder['status'], opts?: { reason?: string }): Partial<WorkOrder> {
   const tsField = STATUS_TS[status]
   const patch: Partial<WorkOrder> = { status }
   if (tsField) (patch as Record<string, unknown>)[tsField] = new Date().toISOString()
@@ -276,14 +666,52 @@ export async function setOrderStatus(
     patch.pauseReason = null
   }
   if (status === 'rejected') patch.rejectReason = opts?.reason ?? null
+  return patch
+}
 
+/** Смена статуса (+метки времени, причины). Историю пишет триггер/демо-лог. */
+export async function setOrderStatus(
+  id: string,
+  status: WorkOrder['status'],
+  actorName: string,
+  opts?: { reason?: string },
+): Promise<void> {
   if (!isSupabaseConfigured || !supabase) {
-    const action =
-      status === 'suspended' ? `Приостановлен: ${opts?.reason ?? 'причина не указана'}`
-      : status === 'rejected' ? `Отклонён: ${opts?.reason ?? 'причина не указана'}`
-      : 'Статус наряда'
-    return demo.demoUpdateOrder(id, patch, actorName, action)
+    return setOrderStatusDemo(id, status, actorName, opts)
   }
+  return persist(
+    { fn: 'setOrderStatus', args: [id, status, actorName, opts ?? null] },
+    () => setOrderStatusDirect(id, status, actorName, opts),
+    () => undefined,
+  )
+}
+
+async function setOrderStatusDemo(
+  id: string,
+  status: WorkOrder['status'],
+  actorName: string,
+  opts?: { reason?: string },
+): Promise<void> {
+  await assertSingleActive(id)
+  const patch = statusPatch(status, opts)
+  const action =
+    status === 'suspended' ? `Приостановлен: ${opts?.reason ?? 'причина не указана'}`
+    : status === 'rejected' ? `Отклонён: ${opts?.reason ?? 'причина не указана'}`
+    : 'Статус наряда'
+  return demo.demoUpdateOrder(id, patch, actorName, action)
+}
+
+async function setOrderStatusDirect(
+  id: string,
+  status: WorkOrder['status'],
+  actorName: string,
+  opts?: { reason?: string },
+): Promise<void> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  void actorName
+  // Правило одной активной задачи — и при выдаче, и при повторе из очереди.
+  await assertSingleActive(id)
 
   const update: Record<string, unknown> = { status }
   const tsColumn: Partial<Record<WorkOrder['status'], string>> = {
@@ -301,7 +729,7 @@ export async function setOrderStatus(
   }
   if (status === 'rejected') update.reject_reason = opts?.reason ?? null
 
-  const { error } = await supabase.from('work_orders').update(update).eq('id', id)
+  const { error } = await sb.from('work_orders').update(update).eq('id', id)
   if (error) {
     if (error.message.includes('INVALID_TRANSITION')) {
       throw new Error('Недопустимый переход статуса — наряд изменён на сервере. Обновите данные.')
@@ -315,9 +743,10 @@ export async function setOrderStatus(
 async function insertHistory(
   orderId: string, actorName: string, action: string, changes: HistoryChange[],
 ): Promise<void> {
-  if (!supabase) return
-  const { data: userData } = await supabase.auth.getUser()
-  const { error } = await supabase.from('work_order_history').insert({
+  const sb = supabase
+  if (!sb) return
+  const { data: userData } = await sb.auth.getUser()
+  const { error } = await sb.from('work_order_history').insert({
     order_id: orderId, actor_id: userData.user?.id ?? null,
     actor_name: actorName, action, changes,
   })
@@ -325,33 +754,39 @@ async function insertHistory(
 }
 
 export async function getHistory(orderId: string): Promise<HistoryEntry[]> {
-  if (!isSupabaseConfigured || !supabase) return demo.demoGetHistory(orderId)
-  const { data, error } = await supabase
-    .from('work_order_history')
-    .select('id, order_id, actor_name, action, changes, created_at')
-    .eq('order_id', orderId)
-    .order('created_at', { ascending: false })
-  if (error) throw new Error(error.message)
-  return (data ?? []).map(mapHistory)
+  const sb = supabase
+  if (!isSupabaseConfigured || !sb) return demo.demoGetHistory(orderId)
+  return readThrough(`history:${orderId}`, async () => {
+    const { data, error } = await sb
+      .from('work_order_history')
+      .select('id, order_id, actor_name, action, changes, created_at')
+      .eq('order_id', orderId)
+      .order('created_at', { ascending: false })
+    if (error) throw new Error(error.message)
+    return (data ?? []).map(mapHistory)
+  })
 }
 
 export async function recentHistory(limit: number): Promise<Array<HistoryEntry & { orderNumber: string }>> {
-  if (!isSupabaseConfigured || !supabase) {
+  const sb = supabase
+  if (!isSupabaseConfigured || !sb) {
     return demo.demoRecentHistory(limit).map((h) => ({
       ...h,
       orderNumber: demo.demoListOrders().find((o) => o.id === h.orderId)?.number ?? '—',
     }))
   }
-  const { data, error } = await supabase
-    .from('work_order_history')
-    .select('id, order_id, actor_name, action, changes, created_at, work_orders(number)')
-    .order('created_at', { ascending: false })
-    .limit(limit)
-  if (error) throw new Error(error.message)
-  return (data ?? []).map((row) => {
-    const mapped = mapHistory(row)
-    const wo = (row as { work_orders?: { number?: string }[] | null }).work_orders
-    return { ...mapped, orderNumber: wo?.[0]?.number ?? '—' }
+  return readThrough(`historyRecent:${limit}`, async () => {
+    const { data, error } = await sb
+      .from('work_order_history')
+      .select('id, order_id, actor_name, action, changes, created_at, work_orders(number)')
+      .order('created_at', { ascending: false })
+      .limit(limit)
+    if (error) throw new Error(error.message)
+    return (data ?? []).map((row) => {
+      const mapped = mapHistory(row)
+      const wo = (row as { work_orders?: { number?: string }[] | null }).work_orders
+      return { ...mapped, orderNumber: wo?.[0]?.number ?? '—' }
+    })
   })
 }
 
@@ -369,26 +804,29 @@ function mapHistory(row: Record<string, unknown>): HistoryEntry {
 // ---------- Приёмка ----------
 
 export async function getAcceptance(orderId: string): Promise<Acceptance | null> {
-  if (!isSupabaseConfigured || !supabase) return demo.demoGetAcceptance(orderId)
-  const { data, error } = await supabase
-    .from('work_order_acceptance')
-    .select('*')
-    .eq('order_id', orderId)
-    .maybeSingle()
-  if (error) throw new Error(error.message)
-  if (!data) return null
-  const r = data as Record<string, unknown>
-  return {
-    id: r.id as string,
-    orderId: r.order_id as string,
-    aiScore: Number(r.ai_score),
-    aiComment: (r.ai_comment as string) ?? '',
-    masterDecision: r.master_decision as DbAcceptance['masterDecision'],
-    agreedWithAi: Boolean(r.agreed_with_ai),
-    masterComment: (r.master_comment as string | null) ?? null,
-    checklist: (r.checklist as ChecklistItem[] | null) ?? null,
-    createdAt: r.created_at as string,
-  }
+  const sb = supabase
+  if (!isSupabaseConfigured || !sb) return demo.demoGetAcceptance(orderId)
+  return readThrough(`acceptance:${orderId}`, async () => {
+    const { data, error } = await sb
+      .from('work_order_acceptance')
+      .select('*')
+      .eq('order_id', orderId)
+      .maybeSingle()
+    if (error) throw new Error(error.message)
+    if (!data) return null
+    const r = data as Record<string, unknown>
+    return {
+      id: r.id as string,
+      orderId: r.order_id as string,
+      aiScore: Number(r.ai_score),
+      aiComment: (r.ai_comment as string) ?? '',
+      masterDecision: r.master_decision as DbAcceptance['masterDecision'],
+      agreedWithAi: Boolean(r.agreed_with_ai),
+      masterComment: (r.master_comment as string | null) ?? null,
+      checklist: (r.checklist as ChecklistItem[] | null) ?? null,
+      createdAt: r.created_at as string,
+    }
+  })
 }
 
 export async function saveAcceptance(
@@ -406,8 +844,29 @@ export async function saveAcceptance(
   if (!isSupabaseConfigured || !supabase) {
     return demo.demoSaveAcceptance(orderId, data, actorName)
   }
-  const { data: userData } = await supabase.auth.getUser()
-  const { error } = await supabase.from('work_order_acceptance').upsert({
+  return persist(
+    { fn: 'saveAcceptance', args: [orderId, data, actorName] },
+    () => saveAcceptanceDirect(orderId, data, actorName),
+    () => undefined,
+  )
+}
+
+async function saveAcceptanceDirect(
+  orderId: string,
+  data: {
+    aiScore: number
+    aiComment: string
+    masterDecision: Acceptance['masterDecision']
+    agreedWithAi: boolean
+    masterComment: string | null
+    checklist: ChecklistItem[] | null
+  },
+  actorName: string,
+): Promise<void> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  const { data: userData } = await sb.auth.getUser()
+  const { error } = await sb.from('work_order_acceptance').upsert({
     order_id: orderId,
     ai_score: data.aiScore,
     ai_comment: data.aiComment,
@@ -457,7 +916,8 @@ export async function workerEquipmentStats(workerId: string): Promise<Array<{ eq
 
 // ---------- Уведомления (ТЗ §32, §50) ----------
 
-async function workerUserId(workerId: string): Promise<string | null> {
+async function workerUserId(workerId: string | null): Promise<string | null> {
+  if (!workerId) return null
   if (!isSupabaseConfigured || !supabase) {
     return demo.demoListWorkers().find((w) => w.id === workerId)?.userId ?? null
   }
@@ -474,10 +934,71 @@ export async function createNotification(n: {
   message: string
 }): Promise<void> {
   if (!isSupabaseConfigured || !supabase) return demo.demoCreateNotification(n)
-  const { error } = await supabase.from('notifications').insert({
-    user_id: n.userId, work_order_id: n.workOrderId,
-    type: n.type, title: n.title, message: n.message,
+  const id = uid()
+  return persist(
+    { fn: 'createNotification', args: [n, id] },
+    () => createNotificationDirect(n, id),
+    () => undefined,
+  )
+}
+
+async function createNotificationDirect(
+  n: { userId: string; workOrderId: string | null; type: string; title: string; message: string },
+  id: string,
+): Promise<void> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  const { error } = await sb.from('notifications').upsert({
+    id,
+    user_id: n.userId,
+    work_order_id: n.workOrderId,
+    type: n.type,
+    title: n.title,
+    message: n.message,
+  }, { onConflict: 'id', ignoreDuplicates: true })
+  if (error) throw new Error(error.message)
+}
+
+export async function listNotifications(userId: string): Promise<Notification[]> {
+  const sb = supabase
+  if (!isSupabaseConfigured || !sb) return demo.demoListNotifications(userId)
+  return readThrough(`notifications:${userId}`, async () => {
+    const { data, error } = await sb
+      .from('notifications')
+      .select('id, user_id, work_order_id, type, title, message, is_read, created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(50)
+    if (error) throw new Error(error.message)
+    return (data ?? []).map((r) => ({
+      id: r.id as string,
+      userId: r.user_id as string,
+      workOrderId: (r.work_order_id as string | null) ?? null,
+      type: r.type as string,
+      title: r.title as string,
+      message: r.message as string,
+      isRead: Boolean(r.is_read),
+      createdAt: r.created_at as string,
+    }))
   })
+}
+
+export async function markNotificationsRead(userId: string): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return demo.demoMarkNotificationsRead(userId)
+  return persist(
+    { fn: 'markNotificationsRead', args: [userId] },
+    () => markNotificationsReadDirect(userId),
+    () => undefined,
+  )
+}
+
+async function markNotificationsReadDirect(userId: string): Promise<void> {
+  const sb = supabase
+  if (!sb) throw new Error('Supabase не настроен')
+  const { error } = await sb.from('notifications')
+    .update({ is_read: true, read_at: new Date().toISOString() })
+    .eq('user_id', userId)
+    .eq('is_read', false)
   if (error) throw new Error(error.message)
 }
 
@@ -488,41 +1009,78 @@ export async function notifyOrderEvent(orderId: string, type: string, title: str
   await createNotification({ userId: order.createdBy, workOrderId: orderId, type, title, message })
 }
 
-export async function listNotifications(userId: string): Promise<Notification[]> {
-  if (!isSupabaseConfigured || !supabase) return demo.demoListNotifications(userId)
-  const { data, error } = await supabase
-    .from('notifications')
-    .select('id, user_id, work_order_id, type, title, message, is_read, created_at')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false })
-    .limit(50)
-  if (error) throw new Error(error.message)
-  return (data ?? []).map((r) => ({
-    id: r.id as string,
-    userId: r.user_id as string,
-    workOrderId: (r.work_order_id as string | null) ?? null,
-    type: r.type as string,
-    title: r.title as string,
-    message: r.message as string,
-    isRead: Boolean(r.is_read),
-    createdAt: r.created_at as string,
-  }))
-}
-
-export async function markNotificationsRead(userId: string): Promise<void> {
-  if (!isSupabaseConfigured || !supabase) return demo.demoMarkNotificationsRead(userId)
-  const { error } = await supabase
-    .from('notifications')
-    .update({ is_read: true, read_at: new Date().toISOString() })
-    .eq('user_id', userId)
-    .eq('is_read', false)
-  if (error) throw new Error(error.message)
-}
-
 /** Уведомить Исполнителя наряда о событии (от мастера). */
 export async function notifyWorkerEvent(orderId: string, type: string, title: string, message: string): Promise<void> {
   const order = await getOrder(orderId)
   if (!order?.workerId) return
   const userId = await workerUserId(order.workerId)
   if (userId) await createNotification({ userId, workOrderId: orderId, type, title, message })
+}
+
+// ---------- Восстановление из офлайн-очереди ----------
+
+/** Прямые (без persist) реализации — их же дёргает очередь при появлении сети. */
+const DB_OPS: Record<DbFnName, (...args: any[]) => Promise<unknown>> = {
+  createOrder: (input: NewOrderInput, actorName: string, opts: { id: string; number: string }) =>
+    createOrderDirect(input, actorName, opts.id, opts.number),
+  updateOrder: (id: string, patch: Partial<WorkOrder>, actor: string, action?: string) =>
+    updateOrderDirect(id, patch, actor, action ?? 'Изменение наряда'),
+  setOrderStatus: (id: string, status: WorkOrder['status'], actor: string, opts?: { reason?: string } | null) =>
+    setOrderStatusDirect(id, status, actor, opts ?? undefined),
+  saveAcceptance: (orderId: string, data: Parameters<typeof saveAcceptanceDirect>[1], actor: string) =>
+    saveAcceptanceDirect(orderId, data, actor),
+  createArea: (name: string, id: string) => createAreaDirect(name, id),
+  updateArea: (id: string, name: string) => updateAreaDirect(id, name),
+  createEquipment: (name: string, areaId: string, id: string) => createEquipmentDirect(name, areaId, id),
+  updateEquipment: (id: string, areaId: string) => updateEquipmentDirect(id, areaId),
+  createWorker: (input: WorkerCardInput, id: string) => createWorkerDirect(input, id),
+  updateWorker: (id: string, patch: Partial<WorkerCardInput>) => updateWorkerDirect(id, patch),
+  updateWorkerStatus: (id: string, status: WorkerStatus) => updateWorkerStatusDirect(id, status),
+  saveMaterial: (row: Parameters<typeof saveMaterialDirect>[0], isUpdate: boolean) =>
+    saveMaterialDirect(row, isUpdate),
+  deleteMaterial: (id: string) => deleteMaterialDirect(id),
+  createFaultCode: (input: FaultCode) => createFaultCodeDirect(input),
+  updateFaultCode: (code: string, patch: Partial<FaultCode>) => updateFaultCodeDirect(code, patch),
+  createNotification: (
+    n: Parameters<typeof createNotificationDirect>[0],
+    id: string,
+  ) => createNotificationDirect(n, id),
+  markNotificationsRead: (userId: string) => markNotificationsReadDirect(userId),
+}
+
+/**
+ * Применение операции из офлайн-очереди к БД (вызывает sync.flushQueue).
+ * Обрабатывает как универсальные 'db'-операции, так и классические
+ * 'status'/'complete' кабинета Исполнителя.
+ */
+export async function runQueuedOp(op: SyncOp, defaultActor = 'Система'): Promise<void> {
+  const ready = Boolean(isSupabaseConfigured && supabase)
+  if (op.operationType === 'db' && op.payload.db) {
+    if (!ready) return // в демо db-операции не накапливаются
+    const { fn, args } = op.payload.db
+    const runner = DB_OPS[fn]
+    if (!runner) throw new Error(`Неизвестная операция очереди: ${fn}`)
+    await runner(...args)
+    return
+  }
+  const actor = op.payload.actor ?? defaultActor
+  if (op.operationType === 'status' && op.payload.status) {
+    if (!ready) {
+      return setOrderStatusDemo(
+        op.entityId, op.payload.status, actor,
+        op.payload.reason ? { reason: op.payload.reason } : undefined,
+      )
+    }
+    await setOrderStatusDirect(
+      op.entityId, op.payload.status, actor,
+      op.payload.reason ? { reason: op.payload.reason } : undefined,
+    )
+  } else if (op.operationType === 'complete' && op.payload.patch) {
+    const action = op.payload.action ?? 'Работы сданы'
+    if (!ready) {
+      demo.demoUpdateOrder(op.entityId, op.payload.patch, actor, action)
+      return
+    }
+    await updateOrderDirect(op.entityId, op.payload.patch, actor, action)
+  }
 }

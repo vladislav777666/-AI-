@@ -64,16 +64,16 @@ export default function WorkerApp({ profile }: { profile: Profile }) {
     }
   }, [profile.id])
 
-  const runner = useCallback(async (op: SyncOp) => {
-    const actor = profile.fullName || 'Исполнитель'
-    if (op.operationType === 'status' && op.payload.status) {
-      await db.setOrderStatus(op.entityId, op.payload.status, actor, { reason: op.payload.reason })
-    } else if (op.operationType === 'complete' && op.payload.patch) {
-      await db.updateOrder(op.entityId, op.payload.patch, actor, op.payload.action ?? 'Работы сданы')
-    }
-  }, [profile.fullName])
+  // Восстановление из офлайн-очереди — единый диспетчер db.runQueuedOp
+  // (обрабатывает и классические 'status'/'complete', и 'db'-операции).
+  const runner = useCallback(
+    async (op: SyncOp) => {
+      await db.runQueuedOp(op, profile.fullName || 'Исполнитель')
+    },
+    [profile.fullName],
+  )
 
-  const { online, pending, lastError, syncing, submit } = useSync(runner)
+  const { online, pending, failed, lastError, syncing, submit } = useSync(runner)
 
   const act = useCallback<WorkerCtx['act']>(async (plan) => {
     if (plan.patch) {
@@ -83,7 +83,8 @@ export default function WorkerApp({ profile }: { profile: Profile }) {
       await submit({ operationType: 'status', entityId: plan.orderId, payload: { status: plan.status, reason: plan.reason } })
     }
     await refresh()
-    if (plan.notify && navigator.onLine) {
+    // Без гейта по сети: createNotification сам уходит в офлайн-очередь.
+    if (plan.notify) {
       await db.notifyOrderEvent(plan.orderId, plan.notify.type, plan.notify.title, plan.notify.message).catch(() => {})
     }
   }, [submit, refresh])
@@ -116,6 +117,13 @@ export default function WorkerApp({ profile }: { profile: Profile }) {
 
   useEffect(() => {
     void refresh().then(() => refreshNotifs())
+  }, [refresh, refreshNotifs])
+
+  // После фоновой синхронизации с БД — перечитываем данные (ТЗ «везде и всегда»).
+  useEffect(() => {
+    const onSynced = () => { void refresh(); void refreshNotifs() }
+    window.addEventListener('db-synced', onSynced)
+    return () => window.removeEventListener('db-synced', onSynced)
   }, [refresh, refreshNotifs])
 
   useEffect(() => {
@@ -168,6 +176,8 @@ export default function WorkerApp({ profile }: { profile: Profile }) {
                 <span className="text-neutral-500">○ Нет сети · изменения будут отправлены автоматически</span>
               ) : pending > 0 ? (
                 <span className="text-orange-600">Ожидает синхронизации: {pending} действий</span>
+              ) : failed > 0 ? (
+                <span className="text-red-600">! Не синхронизировано: {failed} действий</span>
               ) : lastError ? (
                 <span className="text-red-600">! Не удалось синхронизировать: {lastError}</span>
               ) : (

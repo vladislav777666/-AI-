@@ -6,7 +6,7 @@ import { aiVerdict } from '../../lib/ai'
 import * as db from '../../lib/db'
 import {
   DECISION_LABELS, isOverdue, ORDER_STATUS_LABELS,
-  type HistoryEntry, type MasterDecision,
+  type FaultCode, type HistoryEntry, type MasterDecision,
 } from '../../lib/types'
 import { Btn, Card, Screen, Select, Stars, TextArea } from '../../components/ui'
 import OrderForm, { valuesFromOrder, type OrderFormValues } from './OrderForm'
@@ -28,6 +28,13 @@ export default function OrderDetail({ data, orderId }: { data: MasterData; order
   const [decision, setDecision] = useState<MasterDecision>('accepted')
   const [masterComment, setMasterComment] = useState('')
   const [acceptanceInfo, setAcceptanceInfo] = useState<Awaited<ReturnType<typeof db.getAcceptance>>>(null)
+  const [faultCodes, setFaultCodes] = useState<FaultCode[]>([])
+
+  useEffect(() => {
+    let alive = true
+    void db.listFaultCodes().then((r) => alive && setFaultCodes(r)).catch(() => {})
+    return () => { alive = false }
+  }, [])
 
   useEffect(() => {
     if (order && !form) setForm(valuesFromOrder(order))
@@ -45,7 +52,7 @@ export default function OrderDetail({ data, orderId }: { data: MasterData; order
   }
 
   const actor = data.profile.fullName || 'Мастер'
-  const verdict = aiVerdict(order)
+  const verdict = aiVerdict(order, faultCodes)
   const canAccept = order.status === 'completed'
   const canCancel = !['cancelled', 'closed'].includes(order.status)
   const isEditable = !['cancelled', 'closed'].includes(order.status)
@@ -107,7 +114,7 @@ export default function OrderDetail({ data, orderId }: { data: MasterData; order
           masterDecision: finalDecision,
           agreedWithAi: agreeAi ?? true,
         masterComment: masterComment.trim() || null,
-        checklist: null,
+        checklist: verdict.checklist,
       },
       actor,
       )
@@ -141,6 +148,12 @@ export default function OrderDetail({ data, orderId }: { data: MasterData; order
     >
       {error && <p role="alert" className="border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>}
 
+      {/* Номер, дата и время выдачи (ТЗ §3.1) */}
+      <p className="text-sm text-neutral-500">
+        Номер: <span className="font-medium text-neutral-900">{order.number}</span>
+        {' '}· Дата и время выдачи: {new Date(order.createdAt).toLocaleString('ru-RU')}
+      </p>
+
       {isEditable ? (
         <OrderForm data={data} values={form} onChange={setForm} bigFont={bigFont} showNumber={order.number} />
       ) : (
@@ -159,14 +172,59 @@ export default function OrderDetail({ data, orderId }: { data: MasterData; order
         </div>
       )}
 
-      {/* ---- Приёмка работ (ТЗ §5) ---- */}
+      {/* ---- Приёмка работ (ТЗ §5) + блок §3.2 «Оценка и контроль качества» ---- */}
       {order.status === 'completed' && canAccept && (
         <Card className="border-neutral-900">
-          <h3 className="text-lg font-semibold">Вердикт ИИ</h3>
-          <div className="mt-2 flex items-center gap-3">
+          <h3 className="text-lg font-semibold">Оценка и контроль качества (§3.2)</h3>
+
+          {/* Оценка */}
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <span className="text-sm text-neutral-500">Оценка</span>
             <Stars value={verdict.score} />
             <span className="text-sm font-medium">{verdict.score}/5</span>
           </div>
+
+          {/* Комментарий к оценке */}
+          <label className="mt-3 flex flex-col gap-1 text-sm text-neutral-500">
+            Комментарий к оценке
+            <TextArea
+              value={masterComment}
+              onChange={(e) => setMasterComment(e.target.value)}
+              placeholder="Комментарий мастера к результатам проверки"
+            />
+          </label>
+
+          {/* Таблица автоматизированной/ручной проверки (ТЗ §3.2) */}
+          <div className="mt-4 overflow-x-auto border border-neutral-200">
+            <table className="w-full min-w-[560px] border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-neutral-200 bg-neutral-50 text-left text-xs uppercase text-neutral-500">
+                  <th className="px-3 py-2 font-medium">Критерий</th>
+                  <th className="px-3 py-2 font-medium">Результат</th>
+                  <th className="px-3 py-2 font-medium">Комментарий</th>
+                </tr>
+              </thead>
+              <tbody>
+                {verdict.checklist.map((c) => (
+                  <tr key={c.code} className="border-b border-neutral-100 last:border-0">
+                    <td className="px-3 py-2">
+                      <span className="font-medium">{c.label}</span>
+                      {c.external && (
+                        <span className="ml-2 border border-neutral-400 px-1 py-0.5 text-[10px] uppercase text-neutral-500">
+                          внешний модуль 6.3
+                        </span>
+                      )}
+                    </td>
+                    <td className={`px-3 py-2 ${c.passed ? 'text-green-700' : 'text-red-600'}`}>
+                      {c.passed ? 'Пройден' : 'Не пройден'}
+                    </td>
+                    <td className="px-3 py-2 text-neutral-600">{c.comment}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
           <p className="mt-2 whitespace-pre-wrap text-sm text-neutral-700">{verdict.comment}</p>
 
           <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -194,10 +252,6 @@ export default function OrderDetail({ data, orderId }: { data: MasterData; order
                   ))}
                 </Select>
               </label>
-              <label className="flex flex-col gap-1 text-sm text-neutral-500">
-                Комментарий мастера
-                <TextArea value={masterComment} onChange={(e) => setMasterComment(e.target.value)} />
-              </label>
               <Btn onClick={acceptWork} disabled={busy}>
                 {busy ? 'Сохраняем…' : 'Завершить приёмку'}
               </Btn>
@@ -213,6 +267,37 @@ export default function OrderDetail({ data, orderId }: { data: MasterData; order
             ИИ: {acceptanceInfo.aiScore}/5 · Решение: {DECISION_LABELS[acceptanceInfo.masterDecision]}
             {acceptanceInfo.masterComment ? ` · ${acceptanceInfo.masterComment}` : ''}
           </p>
+          {acceptanceInfo.checklist && acceptanceInfo.checklist.length > 0 && (
+            <div className="mt-3 overflow-x-auto border border-neutral-200">
+              <table className="w-full min-w-[520px] border-collapse text-sm">
+                <thead>
+                  <tr className="border-b border-neutral-200 bg-neutral-50 text-left text-xs uppercase text-neutral-500">
+                    <th className="px-3 py-2 font-medium">Критерий</th>
+                    <th className="px-3 py-2 font-medium">Результат</th>
+                    <th className="px-3 py-2 font-medium">Комментарий</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {acceptanceInfo.checklist.map((c) => (
+                    <tr key={c.code} className="border-b border-neutral-100 last:border-0">
+                      <td className="px-3 py-2">
+                        <span className="font-medium">{c.label}</span>
+                        {c.external && (
+                          <span className="ml-2 border border-neutral-400 px-1 py-0.5 text-[10px] uppercase text-neutral-500">
+                            внешний модуль 6.3
+                          </span>
+                        )}
+                      </td>
+                      <td className={`px-3 py-2 ${c.passed ? 'text-green-700' : 'text-red-600'}`}>
+                        {c.passed ? 'Пройден' : 'Не пройден'}
+                      </td>
+                      <td className="px-3 py-2 text-neutral-600">{c.comment}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Card>
       )}
 

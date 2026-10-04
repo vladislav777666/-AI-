@@ -3,7 +3,7 @@
 
 import type {
   Acceptance, Area, ChecklistItem, Equipment, FaultCode, HistoryChange, HistoryEntry,
-  NewOrderInput, Notification, Profile, WorkOrder, Worker, WorkerStatus,
+  Material, NewOrderInput, Notification, Profile, WorkOrder, Worker, WorkerStatus,
 } from './types'
 
 const KEY = 'master-module-demo-v1'
@@ -13,6 +13,8 @@ interface DemoStore {
   workers: Worker[]
   areas: Area[]
   equipment: Equipment[]
+  materials: Material[]
+  faultCodes: FaultCode[]
   orders: WorkOrder[]
   history: HistoryEntry[]
   acceptance: Acceptance[]
@@ -36,34 +38,62 @@ function seed(): DemoStore {
     { id: uid(), areaId: areas[1].id, name: 'Конвейер ленточный' },
   ]
   const workers: Worker[] = [
-    { id: uid(), userId: 'demo-worker-1', fullName: 'Типо Исполнитель', specialty: 'Слесарь', status: 'free', rating: 4.6 },
-    { id: uid(), userId: 'demo-worker-2', fullName: 'Иванов И.И.', specialty: 'Электрик', status: 'busy', rating: 4.2 },
-    { id: uid(), userId: 'demo-worker-3', fullName: 'Петров П.П.', specialty: 'Механик', status: 'not_on_shift', rating: 3.9 },
+    { id: uid(), userId: 'demo-worker-1', fullName: 'Типо Исполнитель', specialty: 'Слесарь', rank: '4 разряд', brigade: 'Бригада №1', areaId: areas[0].id, status: 'free', rating: 4.6 },
+    { id: uid(), userId: 'demo-worker-2', fullName: 'Иванов И.И.', specialty: 'Электрик', rank: '5 разряд', brigade: 'Бригада №2', areaId: areas[0].id, status: 'busy', rating: 4.2 },
+    { id: uid(), userId: 'demo-worker-3', fullName: 'Петров П.П.', specialty: 'Механик', rank: '3 разряд', brigade: 'Бригада №2', areaId: areas[1].id, status: 'not_on_shift', rating: 3.9 },
   ]
-  return { profile: null, workers, areas, equipment, orders: [], history: [], acceptance: [], notifications: [], counter: 0 }
+  // Справочник материалов (ТЗ §2.2): название, количество, участок.
+  const materials: Material[] = [
+    { id: uid(), name: 'Подшипник 6205', qty: 24, unit: 'шт', areaId: areas[0].id },
+    { id: uid(), name: 'Масло индустриальное И-ГМ-40', qty: 60, unit: 'л', areaId: areas[1].id },
+    { id: uid(), name: 'Кабель ПВС 3×1.5', qty: 120, unit: 'м', areaId: areas[0].id },
+    { id: uid(), name: 'Пневмоцилиндр SC32×100', qty: 3, unit: 'шт', areaId: areas[1].id },
+  ]
+  return {
+    profile: null, workers, areas, equipment, materials, faultCodes: [...FAULT_CODES],
+    orders: [], history: [], acceptance: [], notifications: [], counter: 0,
+  }
 }
 
 // Справочник шифров неисправностей (ТЗ §19, §43) — тот же состав, что в 0003.
+// Норматив времени, материальный норматив и статус — поля ТЗ §2.5.
 const FAULT_CODES: FaultCode[] = [
-  { code: 'М-01', name: 'Механика: износ подшипника', description: 'Замена/ремонт подшипниковых узлов' },
-  { code: 'М-02', name: 'Механика: люфт вала', description: 'Устранение люфтов и перекосов валов' },
-  { code: 'М-03', name: 'Механика: вибрация', description: 'Балансировка, крепёж, демпфирование' },
-  { code: 'М-04', name: 'Механика: деформация корпуса', description: 'Трещины, сколы, правка корпусных деталей' },
-  { code: 'Э-01', name: 'Электрика: обрыв цепи', description: 'Поиск и устранение обрывов' },
-  { code: 'Э-02', name: 'Электрика: КЗ/замыкание', description: 'Изоляция, замена проводки' },
-  { code: 'Э-03', name: 'Электрика: двигатель', description: 'Ремонт/замена электродвигателя' },
-  { code: 'Э-04', name: 'Электрика: датчики/АСУ', description: 'Неисправности датчиков и автоматики' },
-  { code: 'Г-01', name: 'Гидравлика: утечка', description: 'Течь по соединениям и уплотнениям' },
-  { code: 'Г-02', name: 'Гидравлика: насос', description: 'Ремонт/замена насосного узла' },
-  { code: 'Г-03', name: 'Гидравлика: давление', description: 'Настройка редукторов, клапанов' },
-  { code: 'П-01', name: 'Пневматика: утечка воздуха', description: 'Течь пневмосоединений' },
-  { code: 'П-02', name: 'Пневматика: клапан/цилиндр', description: 'Замена пневмоэлементов' },
-  { code: 'С-01', name: 'Смазка: недостаток смазки', description: 'Восстановление подачи смазки' },
-  { code: 'С-02', name: 'Смазка: загрязнение масла', description: 'Замена масла, промывка' },
+  { code: 'М-01', name: 'Механика: износ подшипника', description: 'Замена/ремонт подшипниковых узлов', normHours: 4, materialNorm: 'Подшипник, съёмник, смазка', workType: 'unplanned' },
+  { code: 'М-02', name: 'Механика: люфт вала', description: 'Устранение люфтов и перекосов валов', normHours: 6, materialNorm: 'Шайбы, прокладки, крепёж', workType: 'unplanned' },
+  { code: 'М-03', name: 'Механика: вибрация', description: 'Балансировка, крепёж, демпфирование', normHours: 3, materialNorm: 'Демпферы, крепёж', workType: 'unplanned' },
+  { code: 'М-04', name: 'Механика: деформация корпуса', description: 'Трещины, сколы, правка корпусных деталей', normHours: 8, materialNorm: 'Сварочные электроды, шпаклёвка', workType: 'unplanned' },
+  { code: 'Э-01', name: 'Электрика: обрыв цепи', description: 'Поиск и устранение обрывов', normHours: 2, materialNorm: 'Провод, клеммы, изолента', workType: 'unplanned' },
+  { code: 'Э-02', name: 'Электрика: КЗ/замыкание', description: 'Изоляция, замена проводки', normHours: 3, materialNorm: 'Кабель, изоляция, предохранители', workType: 'unplanned' },
+  { code: 'Э-03', name: 'Электрика: двигатель', description: 'Ремонт/замена электродвигателя', normHours: 6, materialNorm: 'Двигатель, муфта, крепёж', workType: 'unplanned' },
+  { code: 'Э-04', name: 'Электрика: датчики/АСУ', description: 'Неисправности датчиков и автоматики', normHours: 4, materialNorm: 'Датчик, кабельный ввод', workType: 'unplanned' },
+  { code: 'Г-01', name: 'Гидравлика: утечка', description: 'Течь по соединениям и уплотнениям', normHours: 2, materialNorm: 'Уплотнения, шланг', workType: 'unplanned' },
+  { code: 'Г-02', name: 'Гидравлика: насос', description: 'Ремонт/замена насосного узла', normHours: 5, materialNorm: 'Насос, фильтр, масло', workType: 'unplanned' },
+  { code: 'Г-03', name: 'Гидравлика: давление', description: 'Настройка редукторов, клапанов', normHours: 3, materialNorm: 'Манометр, пружина редуктора', workType: 'unplanned' },
+  { code: 'П-01', name: 'Пневматика: утечка воздуха', description: 'Течь пневмосоединений', normHours: 2, materialNorm: 'Фитинги, лента ФУМ', workType: 'unplanned' },
+  { code: 'П-02', name: 'Пневматика: клапан/цилиндр', description: 'Замена пневмоэлементов', normHours: 4, materialNorm: 'Клапан, цилиндр, уплотнения', workType: 'unplanned' },
+  { code: 'С-01', name: 'Смазка: недостаток смазки', description: 'Восстановление подачи смазки', normHours: 1, materialNorm: 'Смазка, шприц', workType: 'planned' },
+  { code: 'С-02', name: 'Смазка: загрязнение масла', description: 'Замена масла, промывка', normHours: 2, materialNorm: 'Масло, фильтр, промывка', workType: 'planned' },
 ]
 
 export function demoListFaultCodes(): FaultCode[] {
-  return FAULT_CODES
+  return [...load().faultCodes]
+}
+
+/** Редактирование карточки шифра (ТЗ §2.5). */
+export function demoUpdateFaultCode(code: string, patch: Partial<FaultCode>): void {
+  const s = load()
+  const idx = s.faultCodes.findIndex((f) => f.code === code)
+  if (idx < 0) return
+  s.faultCodes[idx] = { ...s.faultCodes[idx], ...patch, code }
+  save()
+}
+
+/** Добавление нового шифра в справочник (ТЗ §2.5). */
+export function demoCreateFaultCode(input: FaultCode): void {
+  const s = load()
+  if (s.faultCodes.some((f) => f.code === input.code)) return
+  s.faultCodes.push({ ...input })
+  save()
 }
 
 let store: DemoStore | null = null
@@ -73,7 +103,23 @@ function load(): DemoStore {
   try {
     const raw = localStorage.getItem(KEY)
     if (raw) {
-      store = JSON.parse(raw) as DemoStore
+      const parsed = JSON.parse(raw) as DemoStore
+      // Миграция старого хранилища: поля справочников ТЗ §2 могли отсутствовать.
+      if (!Array.isArray(parsed.materials)) parsed.materials = []
+      if (!Array.isArray(parsed.faultCodes)) parsed.faultCodes = [...FAULT_CODES]
+      parsed.workers = (parsed.workers ?? []).map((w) => ({
+        ...w,
+        rank: w.rank ?? null,
+        brigade: w.brigade ?? null,
+        areaId: w.areaId ?? null,
+      }))
+      parsed.faultCodes = parsed.faultCodes.map((f) => ({
+        ...f,
+        normHours: f.normHours ?? null,
+        materialNorm: f.materialNorm ?? null,
+        workType: f.workType ?? null,
+      }))
+      store = parsed
       return store
     }
   } catch {
@@ -123,12 +169,100 @@ export function demoUpdateWorkerStatus(workerId: string, status: WorkerStatus): 
   save()
 }
 
+/** Добавление сотрудника администратором, до регистрации (ТЗ §2.4). */
+export function demoCreateWorker(input: {
+  fullName: string; specialty: string; rank: string | null; brigade: string | null; areaId: string | null
+}): void {
+  const s = load()
+  s.workers.push({
+    id: uid(),
+    userId: '', // аккаунт ещё не создан
+    fullName: input.fullName,
+    specialty: input.specialty,
+    rank: input.rank,
+    brigade: input.brigade,
+    areaId: input.areaId,
+    status: 'free',
+    rating: 4.0,
+  })
+  save()
+}
+
+/** Редактирование карточки сотрудника (ТЗ §2.4). */
+export function demoUpdateWorker(workerId: string, patch: Partial<{
+  fullName: string; specialty: string; rank: string | null; brigade: string | null; areaId: string | null
+}>): void {
+  const s = load()
+  const w = s.workers.find((x) => x.id === workerId)
+  if (!w) return
+  Object.assign(w, patch)
+  save()
+}
+
 export function demoListAreas(): Area[] {
   return [...load().areas]
 }
 
+/** Добавление участка (ТЗ §2.1) — возвращаем запись для привязок. */
+export function demoCreateArea(name: string): Area {
+  const s = load()
+  const area: Area = { id: uid(), name }
+  s.areas.push(area)
+  save()
+  return area
+}
+
+/** Переименование участка (ТЗ §2.1). */
+export function demoUpdateArea(id: string, name: string): void {
+  const s = load()
+  const a = s.areas.find((x) => x.id === id)
+  if (a) a.name = name
+  save()
+}
+
 export function demoListEquipment(): Equipment[] {
   return [...load().equipment]
+}
+
+/** Добавление оборудования: Название + Участок (ТЗ §2.3). */
+export function demoCreateEquipment(name: string, areaId: string): void {
+  const s = load()
+  s.equipment.push({ id: uid(), name, areaId })
+  save()
+}
+
+/** Смена участка закрепления оборудования (ТЗ §2.1). В 0002 area_id NOT NULL. */
+export function demoUpdateEquipment(id: string, areaId: string): void {
+  const s = load()
+  const e = s.equipment.find((x) => x.id === id)
+  if (e) e.areaId = areaId
+  save()
+}
+
+// ---------- Материалы и запчасти (ТЗ §2.2) ----------
+
+export function demoListMaterials(): Material[] {
+  return [...load().materials]
+}
+
+/** Создание/обновление позиции справочника материалов (ТЗ §2.2). */
+export function demoSaveMaterial(input: {
+  id?: string; name: string; qty: number; unit: string; areaId: string | null
+}): void {
+  const s = load()
+  if (input.id) {
+    const idx = s.materials.findIndex((m) => m.id === input.id)
+    if (idx >= 0) s.materials[idx] = { id: input.id, name: input.name, qty: input.qty, unit: input.unit, areaId: input.areaId }
+  } else {
+    s.materials.push({ id: uid(), name: input.name, qty: input.qty, unit: input.unit, areaId: input.areaId })
+  }
+  save()
+}
+
+export function demoDeleteMaterial(id: string): void {
+  const s = load()
+  s.materials = s.materials.filter((m) => m.id !== id)
+  save()
 }
 
 export function demoListOrders(): WorkOrder[] {

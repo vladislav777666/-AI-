@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "infisical run --env=dev -- vite",
     "build": "tsc && vite build",
+    "test:offline": "vite build --ssr scripts/offline.test.ts --outDir .tmp-test --emptyOutDir && node .tmp-test/offline.test.js",
     "preview": "vite preview",
     "android:sync": "npm run build && cap sync android",
     "android:open": "npm run android:sync && cap open android"

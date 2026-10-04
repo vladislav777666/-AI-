@@ -34,3 +34,6 @@ android/app/src/main/assets/capacitor.config.json
 
 # Supabase CLI (локальное состояние линка, не источник)
 supabase/.temp/
+.tmp-test/
+# Локальные тестовые сборки (демо-режим, юнит-прогоны)
+dist-test/

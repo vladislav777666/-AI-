@@ -33,6 +33,12 @@ export interface Worker {
   userId: string
   fullName: string
   specialty: string
+  /** Разряд (ТЗ §2.4). */
+  rank: string | null
+  /** Бригада (ТЗ §2.4). */
+  brigade: string | null
+  /** Закреплённый участок (ТЗ §2.1). */
+  areaId: string | null
   status: WorkerStatus
   rating: number
 }
@@ -60,17 +66,35 @@ export interface MaterialItem {
   unit: string
 }
 
+/** Позиция глобального справочника материалов (ТЗ §2.2). */
+export interface Material {
+  id: string
+  name: string
+  qty: number
+  unit: string
+  /** Привязка к участку (ТЗ §2.2). */
+  areaId: string | null
+}
+
 export interface ChecklistItem {
   code: string
   label: string
   passed: boolean
   comment: string | null
+  /** Критерий считает внешний модуль (ТЗ §3.2, Модуль 6.3). */
+  external?: boolean
 }
 
 export interface FaultCode {
   code: string
   name: string
   description: string
+  /** Норматив времени, ч (ТЗ §2.5). */
+  normHours: number | null
+  /** Материальный норматив (ТЗ §2.5). */
+  materialNorm: string | null
+  /** Статус «Плановый\Неплановый» (ТЗ §2.5). */
+  workType: WorkType | null
 }
 
 export interface Notification {
