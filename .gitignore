@@ -31,3 +31,6 @@ dist-ssr
 # Capacitor
 android/app/src/main/assets/public
 android/app/src/main/assets/capacitor.config.json
+
+# Supabase CLI (локальное состояние линка, не источник)
+supabase/.temp/
