@@ -124,9 +124,12 @@ export const dbObjects = {
   workOrderAcceptance: 'public.work_order_acceptance',
   faultCodes: 'public.fault_codes',
   notifications: 'public.notifications',
+  /** Вью зарегистрированных аккаунтов с ролями (0006). */
+  registeredUsers: 'public.registered_users',
   functions: {
     workOrdersGuard: 'public.work_orders_guard',
     workOrdersHistoryTriggerFn: 'public.work_orders_history_trg_fn',
+    setUserRole: 'public.set_user_role',
   },
   triggers: {
     workOrdersGuardTrigger: 'public.work_orders_guard_trg',
@@ -146,6 +149,9 @@ export const migrations = [
   '0001_auth_by_role.sql',
   '0002_master_module.sql',
   '0003_worker_cabinet.sql',
+  '0004_admin_reference_books.sql',
+  '0005_admin_role.sql',
+  '0006_user_roles.sql',
 ] as const
 
 // ---------- Утилиты маппинга ----------

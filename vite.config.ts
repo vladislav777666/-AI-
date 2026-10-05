@@ -17,11 +17,27 @@ import tailwindcss from '@tailwindcss/vite'
 // tailwindcss (создаём src/tailwind.config.ts), который подключается
 // @import "tailwindcss" в src/index.css.
 
+// Прокси NVIDIA NIM (ИИ-вызовы src/lib/llm.ts): у их шлюза ответы POST
+// несут Access-Control-Allow-Origin, а preflight (OPTIONS) идёт без него —
+// браузер блокирует прямые fetch с Authorization. В dev/preview запрос
+// идёт same-origin на /nim и проксируется сервером Vite (CORS не нужен).
+// В статическом проде нужен свой reverse-proxy на /nim либо явный
+// VITE_NIM_API_URL — иначе ИИ тихо откатывается на локальные эвристики.
+const nimProxy = {
+  '/nim': {
+    target: 'https://integrate.api.nvidia.com',
+    changeOrigin: true,
+    rewrite: (path: string) => path.replace(/^\/nim/, ''),
+  },
+}
+
 export default defineConfig({
   plugins: [
     react(),
     tailwindcss({ optimize: true }),
   ],
+  server: { proxy: nimProxy },
+  preview: { proxy: nimProxy },
 })
 
 // Список файлов схемы БД для проверки типа при сборке.

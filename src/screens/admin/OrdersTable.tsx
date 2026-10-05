@@ -1,10 +1,10 @@
-// Список нарядов по оборудованию / сотруднику (ТЗ §2.3, §2.4).
-// Колонки по ТЗ: Статус, Оборудование, Участок, Исполнитель, Приоритет,
-// Шифр неисправности. Клик по строке → карточка наряда (ТЗ §3).
+// Список нарядов по оборудованию / сотруднику (ТЗ §2.3, §2.4) — веб-панель
+// администратора. Колонки по ТЗ: Статус, Оборудование, Участок, Исполнитель,
+// Приоритет, Шифр неисправности. Клик по строке → карточка наряда (ТЗ §3).
 
 import { ORDER_STATUS_LABELS, PRIORITY_LABELS, type WorkOrder } from '../../lib/types'
 import { StatusDot } from '../../components/ui'
-import type { MasterData } from './nav'
+import type { AdminData } from './nav'
 
 const STATUS_COLORS: Record<string, string> = {
   issued: 'bg-neutral-400',
@@ -21,7 +21,7 @@ const STATUS_COLORS: Record<string, string> = {
 
 const HEAD = ['Статус', 'Оборудование', 'Участок', 'Исполнитель', 'Приоритет', 'Шифр неисправности']
 
-export default function OrdersTable({ data, orders }: { data: MasterData; orders: WorkOrder[] }) {
+export default function OrdersTable({ data, orders }: { data: AdminData; orders: WorkOrder[] }) {
   const areaName = (id: string) => data.areas.find((a) => a.id === id)?.name ?? '—'
   const equipmentName = (id: string) => data.equipment.find((e) => e.id === id)?.name ?? '—'
   const workerName = (id: string | null) =>

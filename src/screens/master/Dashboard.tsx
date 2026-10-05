@@ -1,6 +1,6 @@
 // Дашборд Мастера (ТЗ §2): сводная статистика + основное меню.
+// Справочники (ТЗ §2) — отдельная веб-роль «Администратор», здесь их нет.
 
-import { Capacitor } from '@capacitor/core'
 import { isOverdue, type StatusFilter } from '../../lib/types'
 import { Screen } from '../../components/ui'
 import type { MasterData } from './nav'
@@ -22,15 +22,11 @@ export default function Dashboard({ data }: { data: MasterData }) {
     { label: 'Оборудование в простое', value: idleEquipment, filter: 'issued', hint: 'Наряд создан, но ещё не принят в работу' },
   ]
 
-  const menu: Array<{ label: string; screen: 'orders' | 'workers' | 'issue' | 'notifications' | 'refbooks' }> = [
+  const menu: Array<{ label: string; screen: 'orders' | 'workers' | 'issue' | 'notifications' }> = [
     { label: 'Наряды', screen: 'orders' },
     { label: 'Исполнители', screen: 'workers' },
     { label: 'Выдать наряд', screen: 'issue' },
     { label: 'Уведомления', screen: 'notifications' },
-    // «Справочники» — веб-панель администратора, в APK не выводится.
-    ...(Capacitor.isNativePlatform()
-      ? []
-      : [{ label: 'Справочники', screen: 'refbooks' as const }]),
   ]
 
   return (

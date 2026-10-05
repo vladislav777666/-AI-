@@ -2,7 +2,9 @@
 // Без ключей Supabase — демо-режим: вход по роли, данные в localStorage.
 
 import { useState, type FormEvent } from 'react'
+import { Capacitor } from '@capacitor/core'
 import { demoSignInAs, isDemoMode, signIn, signUp } from '../lib/auth'
+import type { Role } from '../lib/types'
 
 export default function Login({ error }: { error: string | null }) {
   const [mode, setMode] = useState<'signin' | 'signup'>('signin')
@@ -50,7 +52,17 @@ export default function Login({ error }: { error: string | null }) {
       <main className="flex flex-1 items-center justify-center px-6 py-12">
         {isDemoMode ? (
           <div className="flex w-full max-w-sm flex-col gap-4">
-            {(['Master', 'Worker'] as const).map((role) => (
+            {([
+              { role: 'Master', label: 'Войти как Мастер' },
+              { role: 'Worker', label: 'Войти как Исполнитель' },
+              // Веб-роли — только веб-продакшен (в APK разделы скрыты).
+              ...(Capacitor.isNativePlatform()
+                ? []
+                : [
+                    { role: 'Head' as Role, label: 'Войти как Руководитель' },
+                    { role: 'Admin' as Role, label: 'Войти как Администратор' },
+                  ]),
+            ] as Array<{ role: Role; label: string }>).map(({ role, label }) => (
               <button
                 key={role}
                 type="button"
@@ -58,7 +70,7 @@ export default function Login({ error }: { error: string | null }) {
                 onClick={() => demoSignInAs(role).catch(() => setLocalError('Не удалось войти'))}
                 className="w-full border border-neutral-900 bg-white px-6 py-4 text-lg font-medium transition-colors hover:bg-neutral-900 hover:text-white"
               >
-                {role === 'Master' ? 'Войти как Мастер' : 'Войти как Исполнитель'}
+                {label}
               </button>
             ))}
           </div>
@@ -119,7 +131,8 @@ export default function Login({ error }: { error: string | null }) {
               {busy ? 'Секунду…' : mode === 'signin' ? 'Войти' : 'Зарегистрироваться'}
             </button>
             <p className="text-center text-xs text-neutral-400">
-              Роль назначается системой: первый пользователь — Мастер, остальные — Исполнители.
+              Роль назначается в БД (public.profiles.role): по умолчанию — Исполнитель,
+              первый пользователь — Мастер; веб-роли выдаются SQL-ом (set_user_role).
             </p>
           </form>
         )}

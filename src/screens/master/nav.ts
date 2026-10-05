@@ -2,9 +2,6 @@
 
 import type { Area, Equipment, Profile, StatusFilter, WorkOrder, Worker } from '../../lib/types'
 
-/** Пять модулей раздела «Справочники» (ТЗ §2.1–2.5). */
-export type RefBookKey = 'areas' | 'materials' | 'equipment' | 'workers' | 'faultCodes'
-
 export type MasterNav =
   | { screen: 'dashboard' }
   | { screen: 'orders'; statusFilter?: StatusFilter }
@@ -14,20 +11,19 @@ export type MasterNav =
   | { screen: 'dossier'; workerId: string }
   | { screen: 'equipmentHistory'; workerId: string; equipmentId: string }
   | { screen: 'notifications' }
-  // Справочники (веб-панель администратора, ТЗ §2)
-  | { screen: 'refbooks' }
-  | { screen: 'refbook'; book: RefBookKey }
-  | { screen: 'equipmentOrders'; equipmentId: string }
-  | { screen: 'workerOrders'; workerId: string }
-  | { screen: 'faultCode'; code: string }
 
-export interface MasterData {
+/** Минимальный набор данных для карточки наряда (ТЗ §3) и её формы.
+ *  Общая для Мастера (MasterData) и веб-Администратора (AdminData). */
+export interface OrderCardData {
   profile: Profile
   workers: Worker[]
   areas: Area[]
   equipment: Equipment[]
   orders: WorkOrder[]
   refresh: () => Promise<void>
+}
+
+export interface MasterData extends OrderCardData {
   go: (nav: MasterNav) => void
   back: () => void
 }

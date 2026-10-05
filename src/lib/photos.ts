@@ -41,7 +41,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   })
 }
 
-/** Голосовой ввод (Web Speech API) — мок «ИИ превращает голос в текст». */
+/** Голосовой ввод — реальный Web Speech API браузера (распознавание речи). */
 export function speechToTextSupported(): boolean {
   return typeof window !== 'undefined' && 'webkitSpeechRecognition' in window
 }

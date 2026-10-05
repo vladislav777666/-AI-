@@ -148,7 +148,11 @@ export function demoLogin(role: Profile['role']): Profile {
   s.profile =
     role === 'Master'
       ? { id: 'demo-master', role, fullName: 'Типо Мастер' }
-      : { id: 'demo-worker-1', role, fullName: 'Типо Исполнитель' }
+      : role === 'Admin'
+        ? { id: 'demo-admin', role, fullName: 'Типо Администратор' }
+        : role === 'Head'
+          ? { id: 'demo-head', role, fullName: 'Типо Руководитель' }
+          : { id: 'demo-worker-1', role, fullName: 'Типо Исполнитель' }
   save()
   return s.profile
 }

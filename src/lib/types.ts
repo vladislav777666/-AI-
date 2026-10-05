@@ -1,6 +1,8 @@
 // Типы модуля «Мастер» + словари подписей.
 
-export type Role = 'Master' | 'Worker'
+/** Роли: Мастер и Исполнитель — везде; Веб-руководитель и Веб-администратор —
+ *  только веб-продакшен (по правам равны, см. supabase/migrations/0006). */
+export type Role = 'Master' | 'Worker' | 'Head' | 'Admin'
 
 export type WorkerStatus = 'free' | 'busy' | 'queue' | 'not_on_shift'
 
@@ -187,6 +189,14 @@ export interface WorkerEquipmentStat {
 }
 
 // ---------- Словари подписей ----------
+
+/** Подписи ролей (заголовки кабинетов и веб-панели). */
+export const ROLE_LABELS: Record<Role, string> = {
+  Master: 'Мастер',
+  Worker: 'Исполнитель',
+  Head: 'Веб-руководитель',
+  Admin: 'Веб-администратор',
+}
 
 export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
   issued: 'Назначен',

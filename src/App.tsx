@@ -1,4 +1,5 @@
-// Корневой компонент: сессия → экран входа / дашборд Мастера / экран Исполнителя.
+// Корневой компонент: сессия → вход / Мастер / Исполнитель / веб-роли
+// (Веб-руководитель и Веб-администратор — общая веб-панель).
 
 import { useEffect, useState } from 'react'
 import { isDemoMode, onAuthChange } from './lib/auth'
@@ -7,6 +8,7 @@ import type { Profile } from './lib/types'
 import Login from './screens/Login'
 import MasterApp from './screens/master/MasterApp'
 import WorkerApp from './screens/worker/WorkerApp'
+import AdminApp from './screens/admin/AdminApp'
 
 type Session =
   | { state: 'loading' }
@@ -46,6 +48,11 @@ export default function App() {
 
   if (session.profile.role === 'Master') {
     return <MasterApp key="master" profile={session.profile} />
+  }
+  if (session.profile.role === 'Admin' || session.profile.role === 'Head') {
+    // Веб-роли (руководитель и администратор): внутри AdminApp
+    // дополнительно гейтится на веб-продакшен.
+    return <AdminApp key="admin" profile={session.profile} />
   }
   return <WorkerApp key="worker" profile={session.profile} />
 }

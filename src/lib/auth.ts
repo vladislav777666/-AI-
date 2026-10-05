@@ -1,4 +1,5 @@
-// Аутентификация: Supabase Auth (email/пароль, роль из profiles),
+// Аутентификация: Supabase Auth (email/пароль, роль из public.profiles.role:
+// Master | Worker | Head | Admin — выдаётся SQL-ом, см. 0006_user_roles.sql),
 // а без ключей — демо-вход по роли (localStorage).
 
 import { isSupabaseConfigured, supabase } from './supabase'
@@ -11,8 +12,14 @@ export const isDemoMode = !isSupabaseConfigured
 
 export async function signIn(email: string, password: string): Promise<void> {
   if (isDemoMode || !supabase) {
-    // Демо: master@demo.ru / worker@demo.ru, любой пароль.
-    demo.demoLogin(email.trim().toLowerCase().startsWith('master') ? 'Master' : 'Worker')
+    // Демо: admin@ / head@ / master@ / worker@, любой пароль.
+    const e = email.trim().toLowerCase()
+    const role: Role =
+      e.startsWith('admin') ? 'Admin'
+        : e.startsWith('head') ? 'Head'
+          : e.startsWith('master') ? 'Master'
+            : 'Worker'
+    demo.demoLogin(role)
     return
   }
   const { error } = await supabase.auth.signInWithPassword({ email, password })

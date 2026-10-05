@@ -20,6 +20,8 @@ import type { WorkerCtx, WorkerView } from './shared'
 
 export default function WorkerApp({ profile }: { profile: Profile }) {
   const [view, setView] = useState<WorkerView>({ view: 'home' })
+  // Стек переходов для кнопки «← Назад» (веб-версия: системной кнопки возврата нет).
+  const [stack, setStack] = useState<WorkerView[]>([])
   const [me, setMe] = useState<Worker | null>(null)
   const [orders, setOrders] = useState<WorkOrder[]>([])
   const [areas, setAreas] = useState<WorkerCtx['areas']>([])
@@ -138,6 +140,31 @@ export default function WorkerApp({ profile }: { profile: Profile }) {
 
   const unread = notifications.filter((n) => !n.isRead).length
 
+  /** Переход вглубь: запоминаем предыдущий экран, чтобы вернуться кнопкой «Назад». */
+  function go(next: WorkerView) {
+    // Отправка работ (close → registry) — выход на верхний уровень: стек
+    // сбрасываем, чтобы «Назад» не возвращал в уже отправленную форму.
+    const finished = view.view === 'close' && next.view === 'registry'
+    setStack((s) => (finished ? [] : [...s, view]))
+    setView(next)
+  }
+
+  /** Кнопка «← Назад»: возврат на предыдущий экран; из корня — на главную. */
+  function back() {
+    if (stack.length === 0) {
+      setView({ view: 'home' })
+      return
+    }
+    setStack(stack.slice(0, -1))
+    setView(stack[stack.length - 1])
+  }
+
+  /** Переход из нижней панели — корневой: стек возврата сбрасывается. */
+  function goRoot(key: string) {
+    setStack([])
+    setView({ view: key } as WorkerView)
+  }
+
   async function logout() {
     await signOut()
     location.reload()
@@ -146,7 +173,7 @@ export default function WorkerApp({ profile }: { profile: Profile }) {
   const ctx: WorkerCtx = {
     profile, me, orders, areas, equipment, faultCodes, notifications, unread, loading,
     sync: { online, pending, syncing, lastError },
-    go: setView, refresh, refreshNotifs, markRead, act,
+    go, refresh, refreshNotifs, markRead, act,
   }
 
   const navItems: NavItem[] = [
@@ -167,23 +194,34 @@ export default function WorkerApp({ profile }: { profile: Profile }) {
         style={{ paddingTop: 'env(safe-area-inset-top)' }}
       >
         <div className="flex items-center justify-between py-3">
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium">Исполнитель · {profile.fullName || 'Исполнитель'}</p>
-            <p className="text-xs" aria-live="polite">
-              {syncing ? (
-                <span className="text-blue-600">↻ Синхронизация...</span>
-              ) : !online ? (
-                <span className="text-neutral-500">○ Нет сети · изменения будут отправлены автоматически</span>
-              ) : pending > 0 ? (
-                <span className="text-orange-600">Ожидает синхронизации: {pending} действий</span>
-              ) : failed > 0 ? (
-                <span className="text-red-600">! Не синхронизировано: {failed} действий</span>
-              ) : lastError ? (
-                <span className="text-red-600">! Не удалось синхронизировать: {lastError}</span>
-              ) : (
-                <span className="text-green-600">● Онлайн</span>
-              )}
-            </p>
+          <div className="flex min-w-0 items-center gap-3">
+            {stack.length > 0 && (
+              <button
+                type="button"
+                onClick={back}
+                className="shrink-0 border border-neutral-300 px-3 py-1.5 text-sm hover:border-neutral-900"
+              >
+                ← Назад
+              </button>
+            )}
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">Исполнитель · {profile.fullName || 'Исполнитель'}</p>
+              <p className="text-xs" aria-live="polite">
+                {syncing ? (
+                  <span className="text-blue-600">↻ Синхронизация...</span>
+                ) : !online ? (
+                  <span className="text-neutral-500">○ Нет сети · изменения будут отправлены автоматически</span>
+                ) : pending > 0 ? (
+                  <span className="text-orange-600">Ожидает синхронизации: {pending} действий</span>
+                ) : failed > 0 ? (
+                  <span className="text-red-600">! Не синхронизировано: {failed} действий</span>
+                ) : lastError ? (
+                  <span className="text-red-600">! Не удалось синхронизировать: {lastError}</span>
+                ) : (
+                  <span className="text-green-600">● Онлайн</span>
+                )}
+              </p>
+            </div>
           </div>
           <div className="flex shrink-0 gap-2">
             <Btn variant="ghost" onClick={() => void logout()}>Выйти</Btn>
@@ -207,7 +245,7 @@ export default function WorkerApp({ profile }: { profile: Profile }) {
         {!loading && view.view === 'notifs' && <Notifs ctx={ctx} />}
       </main>
 
-      <BottomNav items={navItems} activeKey={activeNav} onSelect={(k) => setView({ view: k } as WorkerView)} />
+      <BottomNav items={navItems} activeKey={activeNav} onSelect={goRoot} />
     </div>
   )
 }

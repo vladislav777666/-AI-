@@ -914,6 +914,36 @@ export async function workerEquipmentStats(workerId: string): Promise<Array<{ eq
   return result.sort((a, b) => b.count - a.count)
 }
 
+/** Опыт бригады по конкретному оборудованию: сколько нарядов выполнил
+ *  каждый исполнитель и средняя оценка ИИ по этому оборудованию.
+ *  Используется ИИ-подсказкой исполнителя на форме наряда (ТЗ §3). */
+export async function equipmentWorkerStats(equipmentId: string): Promise<Array<{
+  workerId: string
+  count: number
+  avgScore: number | null
+}>> {
+  if (!equipmentId) return []
+  const orders = await listOrders()
+  const relevant = orders.filter(
+    (o) => o.equipmentId === equipmentId && o.workerId && o.status !== 'cancelled',
+  )
+  const byWorker = new Map<string, { count: number; scores: number[] }>()
+  for (const o of relevant) {
+    const acc = await getAcceptance(o.id)
+    const row = byWorker.get(o.workerId!) ?? { count: 0, scores: [] }
+    row.count += 1
+    if (acc) row.scores.push(acc.aiScore)
+    byWorker.set(o.workerId!, row)
+  }
+  return [...byWorker].map(([workerId, row]) => ({
+    workerId,
+    count: row.count,
+    avgScore: row.scores.length
+      ? row.scores.reduce((a, b) => a + b, 0) / row.scores.length
+      : null,
+  }))
+}
+
 // ---------- Уведомления (ТЗ §32, §50) ----------
 
 async function workerUserId(workerId: string | null): Promise<string | null> {

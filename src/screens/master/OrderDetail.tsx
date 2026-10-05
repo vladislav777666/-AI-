@@ -1,18 +1,35 @@
-// Карточка наряда (ТЗ §4.2–4.3, §5): редактирование, отмена, приёмка
-// с Вердиктом ИИ и история изменений в формате «что было → что стало».
+// Карточка наряда (ТЗ §3): сводка §3.1 со всеми полями, редактирование,
+// отмена, приёмка с Вердиктом ИИ (§3.2) и история изменений в формате
+// «что было → что стало».
 
-import { useEffect, useMemo, useState } from 'react'
-import { aiVerdict } from '../../lib/ai'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { aiVerdict, aiVerdictLLM } from '../../lib/ai'
+import { LLM_MODEL, llmConfigured } from '../../lib/llm'
 import * as db from '../../lib/db'
 import {
-  DECISION_LABELS, isOverdue, ORDER_STATUS_LABELS,
-  type FaultCode, type HistoryEntry, type MasterDecision,
+  DECISION_LABELS, isOverdue, ORDER_STATUS_LABELS, PRIORITY_LABELS, WORK_TYPE_LABELS,
+  type AiVerdict, type FaultCode, type HistoryEntry, type MasterDecision,
 } from '../../lib/types'
-import { Btn, Card, Screen, Select, Stars, TextArea } from '../../components/ui'
+import { Btn, Card, PhotoGallery, Screen, Select, Stars, TextArea } from '../../components/ui'
 import OrderForm, { valuesFromOrder, type OrderFormValues } from './OrderForm'
-import type { MasterData } from './nav'
+import type { OrderCardData } from './nav'
 
-export default function OrderDetail({ data, orderId }: { data: MasterData; orderId: string }) {
+/** Строка сводки §3.1: подпись + значение в таблице карточки (ТЗ §3). */
+function Row({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <tr className="border-b border-neutral-100 align-top last:border-0">
+      <th
+        scope="row"
+        className="w-40 bg-neutral-50 px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-neutral-500"
+      >
+        {label}
+      </th>
+      <td className="px-3 py-2 text-sm text-neutral-800">{children}</td>
+    </tr>
+  )
+}
+
+export default function OrderDetail({ data, orderId }: { data: OrderCardData; orderId: string }) {
   const order = useMemo(
     () => data.orders.find((o) => o.id === orderId) ?? null,
     [data.orders, orderId],
@@ -29,6 +46,11 @@ export default function OrderDetail({ data, orderId }: { data: MasterData; order
   const [masterComment, setMasterComment] = useState('')
   const [acceptanceInfo, setAcceptanceInfo] = useState<Awaited<ReturnType<typeof db.getAcceptance>>>(null)
   const [faultCodes, setFaultCodes] = useState<FaultCode[]>([])
+  // Вердикт §3.2: сначала локальная оценка (мгновенно), затем её заменяет
+  // ответ модели NVIDIA NIM; при недоступности модели остаётся локальная.
+  const [llmVerdict, setLlmVerdict] = useState<AiVerdict | null>(null)
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiFailed, setAiFailed] = useState(false)
 
   useEffect(() => {
     let alive = true
@@ -47,12 +69,34 @@ export default function OrderDetail({ data, orderId }: { data: MasterData; order
     return () => { alive = false }
   }, [orderId, order?.status, order?.closedAt])
 
+  // ИИ-вердикт через NVIDIA NIM — по содержимому наряда, не по каждому ререндеру.
+  useEffect(() => {
+    let alive = true
+    if (!order || !llmConfigured) {
+      setLlmVerdict(null)
+      setAiLoading(false)
+      setAiFailed(false)
+      return
+    }
+    setLlmVerdict(null)
+    setAiFailed(false)
+    setAiLoading(true)
+    aiVerdictLLM(order, faultCodes)
+      .then((v) => { if (alive) setLlmVerdict(v) })
+      .catch(() => { if (alive) setAiFailed(true) })
+      .finally(() => { if (alive) setAiLoading(false) })
+    return () => { alive = false }
+  }, [
+    order?.id, order?.status, order?.description, order?.workDone,
+    order?.materials, order?.photosAfter.length, order?.completedAt, faultCodes,
+  ])
+
   if (!order || !form) {
     return <Screen title="Наряд"><p className="text-sm text-neutral-500">Загрузка…</p></Screen>
   }
 
   const actor = data.profile.fullName || 'Мастер'
-  const verdict = aiVerdict(order, faultCodes)
+  const verdict = llmVerdict ?? aiVerdict(order, faultCodes)
   const canAccept = order.status === 'completed'
   const canCancel = !['cancelled', 'closed'].includes(order.status)
   const isEditable = !['cancelled', 'closed'].includes(order.status)
@@ -135,6 +179,9 @@ export default function OrderDetail({ data, orderId }: { data: MasterData; order
 
   const areaName = data.areas.find((a) => a.id === order.areaId)?.name ?? '—'
   const equipmentName = data.equipment.find((e) => e.id === order.equipmentId)?.name ?? '—'
+  const workerName = (order.workerId && data.workers.find((w) => w.id === order.workerId)?.fullName) || '—'
+  const fault: FaultCode | undefined =
+    order.faultCode ? faultCodes.find((f) => f.code === order.faultCode) : undefined
 
   return (
     <Screen
@@ -148,11 +195,52 @@ export default function OrderDetail({ data, orderId }: { data: MasterData; order
     >
       {error && <p role="alert" className="border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>}
 
-      {/* Номер, дата и время выдачи (ТЗ §3.1) */}
-      <p className="text-sm text-neutral-500">
-        Номер: <span className="font-medium text-neutral-900">{order.number}</span>
-        {' '}· Дата и время выдачи: {new Date(order.createdAt).toLocaleString('ru-RU')}
-      </p>
+      {/* ---- Сводка карточки наряда (ТЗ §3.1): таблица со всеми полями ---- */}
+      <Card>
+        <h3 className="text-lg font-semibold">Детальная информация (карточка наряда §3.1)</h3>
+        <div className="mt-3 overflow-x-auto border border-neutral-200">
+          <table className="w-full min-w-[480px] border-collapse text-sm">
+            <tbody>
+              <Row label="Номер"><span className="font-medium">{order.number}</span></Row>
+              <Row label="Дата и время выдачи">{new Date(order.createdAt).toLocaleString('ru-RU')}</Row>
+              <Row label="Тип работ">{WORK_TYPE_LABELS[order.workType]}</Row>
+              <Row label="Приоритет">{PRIORITY_LABELS[order.priority]}</Row>
+              <Row label="Описание проблемы и работ">
+                <span className="whitespace-pre-wrap">{order.description}</span>
+              </Row>
+              <Row label="Участок">{areaName}</Row>
+              <Row label="Оборудование">{equipmentName}</Row>
+              <Row label="Шифр неисправности">
+                {order.faultCode
+                  ? `${order.faultCode}${fault?.name ? ` — ${fault.name}` : ''}${fault?.normHours != null ? ` · норматив ${fault.normHours} ч` : ''}`
+                  : '—'}
+              </Row>
+              <Row label="Исполнитель">{workerName}</Row>
+              <Row label="Срок исполнения">
+                {new Date(order.deadline).toLocaleString('ru-RU')}
+                {isOverdue(order) && <span className="ml-2 font-medium text-red-600">ПРОСРОЧЕН</span>}
+              </Row>
+              <Row label="Комментарий">{order.comment || '—'}</Row>
+              <Row label="Фото неисправности">
+                {order.photos.length > 0
+                  ? <PhotoGallery photos={order.photos} label="Фото неисправности" />
+                  : <span className="text-neutral-400">нет</span>}
+              </Row>
+              <Row label="Фото после">
+                {order.photosAfter.length > 0
+                  ? <PhotoGallery photos={order.photosAfter} label="Фото после" />
+                  : <span className="text-neutral-400">нет</span>}
+              </Row>
+              <Row label="Оценка">
+                {acceptanceInfo
+                  ? <Stars value={acceptanceInfo.aiScore} />
+                  : <span className="text-neutral-400">— приёмка не выполнена</span>}
+              </Row>
+              <Row label="Комментарий к оценке">{acceptanceInfo?.masterComment || '—'}</Row>
+            </tbody>
+          </table>
+        </div>
+      </Card>
 
       {isEditable ? (
         <OrderForm data={data} values={form} onChange={setForm} bigFont={bigFont} showNumber={order.number} />
@@ -176,6 +264,17 @@ export default function OrderDetail({ data, orderId }: { data: MasterData; order
       {order.status === 'completed' && canAccept && (
         <Card className="border-neutral-900">
           <h3 className="text-lg font-semibold">Оценка и контроль качества (§3.2)</h3>
+          <p className="mt-1 text-xs text-neutral-500">
+            {aiLoading
+              ? `⏳ ИИ-модель ${LLM_MODEL} оценивает наряд…`
+              : llmVerdict
+                ? `Источник: NVIDIA NIM · ${LLM_MODEL}`
+                : aiFailed
+                  ? 'Модель недоступна — показана локальная оценка'
+                  : llmConfigured
+                    ? 'Локальная оценка (модель ещё не отвечала)'
+                    : `Ключ NVIDIA NIM не задан — локальная оценка`}
+          </p>
 
           {/* Оценка */}
           <div className="mt-3 flex flex-wrap items-center gap-3">
@@ -301,31 +400,12 @@ export default function OrderDetail({ data, orderId }: { data: MasterData; order
         </Card>
       )}
 
-      {/* Работы исполнителя */}
-      {(order.workDone || order.materials || order.photosAfter.length > 0) && (
+      {/* Работы исполнителя (фото «после» — в сводке §3.1 выше) */}
+      {(order.workDone || order.materials) && (
         <Card>
           <h3 className="text-sm font-semibold">Выполненные работы</h3>
           {order.workDone && <p className="mt-1 whitespace-pre-wrap text-sm">{order.workDone}</p>}
           {order.materials && <p className="mt-1 text-sm text-neutral-600">Материалы: {order.materials}</p>}
-          {order.photosAfter.length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-2">
-              {order.photosAfter.map((src, i) => (
-                <img key={i} src={src} alt={`После ${i + 1}`} className="h-20 w-20 border border-neutral-300 object-cover" />
-              ))}
-            </div>
-          )}
-        </Card>
-      )}
-
-      {/* Фото неисправности */}
-      {order.photos.length > 0 && (
-        <Card>
-          <h3 className="text-sm font-semibold">Фото неисправности</h3>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {order.photos.map((src, i) => (
-              <img key={i} src={src} alt={`Фото ${i + 1}`} className="h-20 w-20 border border-neutral-300 object-cover" />
-            ))}
-          </div>
         </Card>
       )}
 

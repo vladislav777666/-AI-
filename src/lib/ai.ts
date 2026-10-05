@@ -1,7 +1,13 @@
-// ИИ-заглушки (моки) первой итерации: шифр неисправности, подсказка
-// исполнителя и вердикт при приёмке. Позже заменяются реальной моделью.
+// ИИ-модуль: подсказка шифра неисправности, выбор исполнителя и вердикт
+// приёмки §3.2. При заданном ключе NVIDIA NIM (VITE_NVIDIA_NIM_API_KEY)
+// ответы даёт реальная модель (см. llm.ts); без ключа или при ошибке сети
+// работают локальные эвристики ниже — они же мгновенный фоллбэк.
 
-import type { AiVerdict, ChecklistItem, FaultCode, WorkOrder, Worker } from './types'
+import { LLM_MODEL, llmConfigured, llmJson } from './llm'
+import {
+  WORKER_STATUS_LABELS,
+  type AiVerdict, type ChecklistItem, type FaultCode, type WorkOrder, type Worker,
+} from './types'
 
 // ---------- Шифр неисправности: М/Э/Г/П/С + номер ----------
 
@@ -21,7 +27,7 @@ const FAULT_NAMES: Record<string, string> = {
   С: 'смазка',
 }
 
-/** Простой мок-классификатор: по ключевым словам в описании. */
+/** Локальная эвристика по ключевым словам — фоллбэк, когда модель недоступна. */
 export function suggestFaultCode(description: string): { code: string; normHours: number; hint: string } {
   const text = description.toLowerCase()
   let best = 'М'
@@ -55,23 +61,47 @@ export interface WorkerSuggestion {
   reason: string
 }
 
-/** Мок ИИ-подсказки: свободный, не на смене отсекается, лучший рейтинг, меньше очереди. */
-export function suggestWorker(workers: Worker[], orders: WorkOrder[]): WorkerSuggestion | null {
+/** Опыт бригады по выбранному оборудованию — «желательный» критерий
+ *  подсказки исполнителя (ТЗ §3: рейтинг по этому типу оборудования). */
+export interface WorkerEquipmentContext {
+  equipmentName: string
+  /** workerId → количество нарядов и средняя оценка ИИ по этому оборудованию. */
+  stats: Record<string, { count: number; avgScore: number | null }>
+}
+
+/** Локальная эвристика исполнителя (фоллбэк): свободный, не на смене
+ *  отсекается, лучший рейтинг, меньше очереди; при выбранном оборудовании
+ *  добавляется опыт и средняя оценка именно по нему. */
+export function suggestWorker(
+  workers: Worker[],
+  orders: WorkOrder[],
+  equipment?: WorkerEquipmentContext | null,
+): WorkerSuggestion | null {
   const candidates = workers.filter((w) => w.status !== 'not_on_shift')
   if (candidates.length === 0) return null
 
   let best: Worker | null = null
   let bestScore = -Infinity
   let bestOpen = 0
+  let bestEq: { count: number; avgScore: number | null } | null = null
   for (const w of candidates) {
     const open = orders.filter(
       (o) => o.workerId === w.id && ['issued', 'accepted', 'in_work', 'queued'].includes(o.status),
     ).length
-    const score = w.rating * 2 - open + (w.status === 'free' ? 3 : w.status === 'queue' ? 0 : -1)
+    const eq = equipment?.stats[w.id] ?? null
+    // Опыт по оборудованию — небольшой бонус: он желателен, но не решает сам по себе.
+    const equipmentBonus = eq
+      ? 0.8 + Math.min(1.2, eq.count * 0.3) + (eq.avgScore != null ? (eq.avgScore - 4) * 0.5 : 0)
+      : 0
+    const score =
+      w.rating * 2 - open +
+      (w.status === 'free' ? 3 : w.status === 'queue' ? 0 : -1) +
+      equipmentBonus
     if (score > bestScore) {
       bestScore = score
       best = w
       bestOpen = open
+      bestEq = eq
     }
   }
   if (!best) return null
@@ -80,7 +110,15 @@ export function suggestWorker(workers: Worker[], orders: WorkOrder[]): WorkerSug
     `рейтинг ${best.rating.toFixed(1)}`,
     bestOpen > 0 ? `нарядов в работе: ${bestOpen}` : 'нет открытых нарядов',
   ]
-  return { worker: best, reason: `ИИ-подсказка: ${best.fullName} — ${parts.join(', ')}.` }
+  if (equipment) {
+    parts.push(
+      bestEq
+        ? `по «${equipment.equipmentName}»: ${bestEq.count} нар.` +
+            (bestEq.avgScore != null ? `, средняя оценка ${bestEq.avgScore.toFixed(1)}` : '')
+        : `по «${equipment.equipmentName}» опыта ещё нет`,
+    )
+  }
+  return { worker: best, reason: `Подсказка: ${best.fullName} — ${parts.join(', ')}.` }
 }
 
 // ---------- Аудит §3.2 «Оценка и контроль качества» ----------
@@ -192,4 +230,233 @@ function words(s: string): string[] {
     .replace(/[^а-яёa-z0-9\s]/g, ' ')
     .split(/\s+/)
     .filter((w) => w.length >= 4)
+}
+
+// ---------- NVIDIA NIM: вызовы реальной модели ----------
+// Выше — локальные эвристики (фоллбэк), ниже — обёртки над моделью.
+// Все функции НЕ бросают исключений на уровне сети: при недоступности
+// модели они возвращают результат эвристики с source: 'local'.
+
+export interface FaultSuggestion {
+  code: string | null
+  normHours: number | null
+  hint: string
+  source: 'nim' | 'local'
+}
+
+/** Фоллбэк подсказки шифра: эвристика + привязка к реальному коду справочника. */
+function localFaultSuggestion(description: string, faultCodes: FaultCode[]): FaultSuggestion {
+  const s = suggestFaultCode(description)
+  const fromCatalog = faultCodes.find((f) => f.code.startsWith(`${s.code[0]}-`))
+  if (fromCatalog) {
+    return {
+      code: fromCatalog.code,
+      normHours: fromCatalog.normHours ?? s.normHours,
+      hint: `Подсказка по ключевым словам: ${fromCatalog.code} — ${fromCatalog.name}.`,
+      source: 'local',
+    }
+  }
+  return { code: s.code, normHours: s.normHours, hint: s.hint, source: 'local' }
+}
+
+/**
+ * Подсказка шифра неисправности: модель выбирает ОДИН код строго из
+ * справочника (ТЗ §2.5). Без ключа или при ошибке сети — локальная эвристика.
+ */
+export async function searchFaultCode(
+  description: string,
+  faultCodes: FaultCode[],
+): Promise<FaultSuggestion> {
+  if (llmConfigured && description.trim() && faultCodes.length > 0) {
+    try {
+      const catalog = faultCodes
+        .map((f) => `${f.code} — ${f.name}${f.normHours != null ? ` (норматив ${f.normHours} ч)` : ''}`)
+        .join('\n')
+      const res = await llmJson<{ code?: unknown; reason?: unknown }>({
+        system:
+          'Ты — опытный механик производственного участка. По описанию проблемы выбери ОДИН ' +
+          'наиболее подходящий шифр неисправности СТРОГО из переданного справочника — ' +
+          'придумывать новые коды нельзя. Отвечай только JSON вида ' +
+          '{"code":"М-01","reason":"почему подходит"} — без markdown.',
+        user: `Описание проблемы:\n${description.trim()}\n\nСправочник шифров:\n${catalog}`,
+        maxTokens: 2_000,
+        temperature: 0.1,
+      })
+      const code = typeof res.code === 'string' ? res.code.trim() : ''
+      const match = faultCodes.find((f) => f.code === code)
+      if (match) {
+        const reason = typeof res.reason === 'string' ? res.reason.replace(/\s*\n+\s*/g, ' ').trim() : ''
+        return {
+          code: match.code,
+          normHours: match.normHours,
+          hint: `ИИ (${LLM_MODEL}): ${match.code} — ${match.name}.${reason ? ` ${reason}` : ''}`,
+          source: 'nim',
+        }
+      }
+    } catch {
+      // модель недоступна — откат на эвристику
+    }
+  }
+  return localFaultSuggestion(description, faultCodes)
+}
+
+/**
+ * ИИ-подсказка исполнителя: модель выбирает одного из бригады по задаче,
+ * статусу и нагрузке. При недоступности модели — локальная эвристика.
+ */
+export async function searchWorker(
+  workers: Worker[],
+  orders: WorkOrder[],
+  task?: string,
+  equipment?: WorkerEquipmentContext | null,
+): Promise<WorkerSuggestion | null> {
+  if (llmConfigured && workers.length > 0) {
+    try {
+      const roster = workers
+        .map((w) => {
+          const open = orders.filter(
+            (o) => o.workerId === w.id && ['issued', 'accepted', 'in_work', 'queued'].includes(o.status),
+          ).length
+          const eq = equipment?.stats[w.id]
+          const bits = [
+            w.specialty,
+            w.rank ?? null,
+            w.brigade ? `бригада ${w.brigade}` : null,
+            `статус: ${WORKER_STATUS_LABELS[w.status]}`,
+            `рейтинг ${w.rating}`,
+            `открытых нарядов: ${open}`,
+            equipment
+              ? eq
+                ? `по оборудованию «${equipment.equipmentName}»: ${eq.count} нар., ` +
+                  `средняя оценка ${eq.avgScore != null ? eq.avgScore.toFixed(1) : 'не выставлена'}`
+                : `по оборудованию «${equipment.equipmentName}» опыта нет`
+              : null,
+          ]
+            .filter(Boolean)
+            .join(', ')
+          return `${w.id} — ${w.fullName} (${bits})`
+        })
+        .join('\n')
+      const res = await llmJson<{ workerId?: unknown; reason?: unknown }>({
+        system:
+          'Ты — диспетчер производства. По задаче и списку бригады выбери ОДИН наиболее ' +
+          'подходящий исполнитель: специальность должна подходить задаче, «не на смене» — брать нельзя, ' +
+          'учитывай рейтинг и открытые наряды' +
+          (equipment
+            ? `, а также опыт и среднюю оценку по оборудованию «${equipment.equipmentName}» ` +
+              '(желательный критерий, не обязательный)'
+            : '') +
+          '. Отвечай только JSON вида ' +
+          '{"workerId":"...","reason":"почему он"} — без markdown.',
+        user: `Задача:\n${(task ?? '').trim() || '(описание не задано)'}\n\nБригада:\n${roster}`,
+        maxTokens: 1_500,
+        temperature: 0.1,
+      })
+      const id = typeof res.workerId === 'string' ? res.workerId.trim() : ''
+      const worker = workers.find((w) => w.id === id && w.status !== 'not_on_shift')
+      if (worker) {
+        const reason = typeof res.reason === 'string'
+          ? res.reason.replace(/\s*\n+\s*/g, ' ').replace(/[.\s]+$/, '').trim()
+          : ''
+        return {
+          worker,
+          reason: `ИИ (${LLM_MODEL}): ${reason || worker.fullName}.`,
+        }
+      }
+    } catch {
+      // модель недоступна — откат на эвристику
+    }
+  }
+  return suggestWorker(workers, orders, equipment)
+}
+
+/**
+ * Вердикт §3.2 силами модели: пять критериев ТЗ оценивает языковая модель
+ * (включая соответствие работ проблеме — сравнение описаний). Присланный JSON
+ * переопределяет passed/comment, счёт считается как локально (пройдено
+ * критериев, 1..5). Бросает исключение, если ключ не задан или модель
+ * недоступна — вызывающий код показывает локальный aiVerdict.
+ */
+export async function aiVerdictLLM(order: WorkOrder, faultCodes: FaultCode[] = []): Promise<AiVerdict> {
+  if (!llmConfigured) throw new Error('NVIDIA NIM: ключ не задан')
+
+  const fault = faultCodes.find((f) => f.code === order.faultCode) ?? null
+  const photoMeta = (list: string[]) =>
+    list.map((src) => `${Math.round((src.length * 0.75) / 1024)} КБ`)
+  const context = {
+    номер: order.number,
+    тип_работ: order.workType === 'planned' ? 'плановый' : 'внеплановый',
+    приоритет: order.priority,
+    описание_проблемы_и_работ: order.description,
+    выполненные_работы: order.workDone ?? null,
+    комментарий_исполнителя: order.workerComment ?? null,
+    списанные_материалы: order.materials ?? null,
+    позиции_материалов: (order.materialsList ?? []).map((m) => `${m.name} × ${m.qty} ${m.unit}`),
+    шифр_неисправности: fault
+      ? {
+          код: fault.code,
+          название: fault.name,
+          материальный_норматив: fault.materialNorm,
+          норматив_ч: fault.normHours,
+        }
+      : order.faultCode,
+    норматив_наряда_ч: order.normHours,
+    срок_исполнения: order.deadline,
+    начало: order.startedAt,
+    завершение: order.completedAt,
+    фото_до_шт: order.photos.length,
+    фото_после_шт: order.photosAfter.length,
+    фото_после_размеры_КБ: photoMeta(order.photosAfter),
+    комментарий_мастера: order.comment ?? null,
+  }
+
+  const res = await llmJson<{
+    criteria?: Partial<Record<string, { passed?: unknown; comment?: unknown }>>
+    summary?: unknown
+  }>({
+    system:
+      'Ты — ИИ-инспектор качества ремонтных работ (ТЗ §3.2, оценка и контроль качества). ' +
+      'Оцени наряд по пяти критериям и строго верни JSON вида ' +
+      '{"criteria":{"COMPLETENESS":{"passed":true,"comment":"..."},' +
+      '"PROBLEM_MATCH":{"passed":true,"comment":"..."},' +
+      '"MATERIAL_LOGIC":{"passed":true,"comment":"..."},' +
+      '"TIME_NORM":{"passed":true,"comment":"..."},' +
+      '"PHOTO_QUALITY":{"passed":true,"comment":"..."}},"summary":"..."}. ' +
+      'Критерии: COMPLETENESS — заполнены ли выполненные работы, шифр, материалы и фото «после»; ' +
+      'PROBLEM_MATCH — сравни описание проблемы и описание выполненных работ: работы должны реально ' +
+      'закрывать заявленную проблему; MATERIAL_LOGIC — списанные материалы соответствуют типу работ ' +
+      'и шифру неисправности, нет ли завышения против обычного расхода и норматива; ' +
+      'TIME_NORM — фактическое время против норматива шифра и планового срока; ' +
+      'PHOTO_QUALITY — достаточность фото «после» (ты не видишь изображения — суди по их количеству ' +
+      'и размерам файлов). passed — строго boolean; comment — по-русски, 1–2 предложения, без markdown; ' +
+      'summary — итог одной фразой по-русски.',
+    user: `Наряд для оценки:\n${JSON.stringify(context, null, 2)}`,
+    maxTokens: 4_000,
+    temperature: 0.1,
+    timeoutMs: 60_000,
+  })
+
+  // База — локальная оценка: она покрывает критерии, которые модель
+  // не прислала, и задаёт структуру чек-листа ТЗ.
+  const base = aiVerdict(order, faultCodes)
+  const criteria = res.criteria ?? {}
+  const clean = (v: unknown, fallback: string): string =>
+    typeof v === 'string' && v.trim() ? v.replace(/\s*\n+\s*/g, ' ').trim() : fallback
+  const checklist: ChecklistItem[] = base.checklist.map((c) => {
+    const r = criteria[c.code]
+    return {
+      ...c,
+      passed: r && typeof r.passed === 'boolean' ? r.passed : c.passed,
+      comment: clean(r?.comment, c.comment ?? ''),
+    }
+  })
+
+  const passedCount = checklist.filter((c) => c.passed).length
+  const score = Math.max(1, Math.min(5, passedCount))
+  const failed = checklist.filter((c) => !c.passed).map((c) => c.label.toLowerCase())
+  const summary = clean(res.summary, '')
+  const comment =
+    `Оценка ИИ (${LLM_MODEL}): ${score}/5. Пройдено критериев: ${passedCount}/5. ` +
+    (summary || (failed.length ? `Требует внимания: ${failed.join(', ')}.` : 'Замечаний не найдено.'))
+  return { score, comment, checklist }
 }

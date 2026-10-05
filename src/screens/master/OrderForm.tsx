@@ -1,15 +1,18 @@
 // Форма наряда (ТЗ §3): общая для «Выдать наряд» и карточки наряда.
 // Режим «по очереди большим шрифтом» — постраничный ввод полей.
+// Шифр неисправности выбирается из справочника (ТЗ §2.5): выбор
+// автоматически подставляет норматив времени — вручную вводить не нужно.
 
-import { useMemo, useState } from 'react'
-import { suggestFaultCode, suggestWorker } from '../../lib/ai'
+import { useEffect, useMemo, useState } from 'react'
+import { searchFaultCode, searchWorker, type WorkerEquipmentContext } from '../../lib/ai'
+import * as db from '../../lib/db'
 import { fileToCompactDataUrl, speechToTextSupported, startSpeechToText } from '../../lib/photos'
 import {
   PRIORITY_LABELS, WORK_TYPE_LABELS,
-  type Priority, type WorkOrder, type WorkType,
+  type FaultCode, type Priority, type WorkOrder, type WorkType,
 } from '../../lib/types'
 import { Btn, Field, Select, TextArea, TextInput } from '../../components/ui'
-import type { MasterData } from './nav'
+import type { OrderCardData } from './nav'
 
 export interface OrderFormValues {
   workType: WorkType
@@ -67,13 +70,14 @@ const BIG_STEPS = [
   'Описание проблемы и работ',
   'Участок',
   'Оборудование',
+  'Шифр неисправности',
   'Исполнитель',
   'Срок исполнения',
   'Приоритет',
 ] as const
 
 export default function OrderForm({ data, values, onChange, bigFont, showNumber }: {
-  data: MasterData
+  data: OrderCardData
   values: OrderFormValues
   onChange: (next: OrderFormValues) => void
   bigFont: boolean
@@ -91,22 +95,91 @@ export default function OrderForm({ data, values, onChange, bigFont, showNumber 
   const [bigStep, setBigStep] = useState(0)
   const [aiHint, setAiHint] = useState<string | null>(null)
   const [listening, setListening] = useState(false)
+  const [faultCodes, setFaultCodes] = useState<FaultCode[]>([])
+  const [aiBusy, setAiBusy] = useState<null | 'fault' | 'worker'>(null)
   const stopRef = useState<(() => void) | null>(null)[0]
   void stopRef
 
-  function aiFaultCode() {
-    if (!values.description.trim()) return
-    const s = suggestFaultCode(values.description)
-    onChange({ ...values, faultCode: s.code, normHours: String(s.normHours) })
-    setAiHint(s.hint)
+  // Справочник шифров неисправности (ТЗ §2.5): через readThrough кэш работает и офлайн.
+  useEffect(() => {
+    let alive = true
+    void db.listFaultCodes().then((r) => alive && setFaultCodes(r)).catch(() => {})
+    return () => { alive = false }
+  }, [])
+
+  const selectedFault = faultCodes.find((f) => f.code === values.faultCode) ?? null
+
+  // Текущее значение шифра всегда присутствует в списке (напр. старые наряды).
+  const faultOptions = useMemo(() => {
+    const list = [...faultCodes]
+    if (values.faultCode && !list.some((f) => f.code === values.faultCode)) {
+      list.push({
+        code: values.faultCode, name: values.faultCode, description: '',
+        normHours: null, materialNorm: null, workType: null,
+      })
+    }
+    return list
+  }, [faultCodes, values.faultCode])
+
+  /** Подсказка шифра через ИИ (NVIDIA NIM) с фоллбэком на эвристику:
+   *  модель оценивает задачу по описанию и комментарию. */
+  async function aiFaultCode() {
+    const task = [values.description, values.comment].filter((s) => s.trim()).join(' ').trim()
+    if (!task || aiBusy) return
+    setAiBusy('fault')
+    try {
+      const s = await searchFaultCode(task, faultCodes)
+      if (s.code) {
+        const f = faultCodes.find((x) => x.code === s.code)
+        const next: OrderFormValues = { ...values, faultCode: s.code }
+        if (f?.normHours != null) next.normHours = String(f.normHours)
+        else if (s.normHours != null) next.normHours = String(s.normHours)
+        if (f?.workType) next.workType = f.workType
+        onChange(next)
+      }
+      setAiHint(s.hint)
+    } catch (err) {
+      setAiHint(err instanceof Error ? err.message : 'ИИ недоступен')
+    } finally {
+      setAiBusy(null)
+    }
   }
 
-  function aiWorkerHint() {
-    const list = workers.length ? workers : []
-    const s = suggestWorker(list, orders)
-    if (s) {
-      onChange({ ...values, workerId: s.worker.id })
-      setAiHint(s.reason)
+  /** Выбор шифра из справочника: автоподстановка норматива и типа работ. */
+  function pickFaultCode(code: string) {
+    const f = faultCodes.find((x) => x.code === code)
+    const next: OrderFormValues = { ...values, faultCode: code }
+    if (f) {
+      if (f.normHours != null) next.normHours = String(f.normHours)
+      if (f.workType) next.workType = f.workType
+    }
+    onChange(next)
+  }
+
+  /** Подсказка исполнителя через ИИ (NVIDIA NIM) с фоллбэком на эвристику.
+   *  Для выбранного оборудования учитываем опыт и среднюю оценку
+   *  исполнителя именно по нему (желательный критерий, ТЗ §3). */
+  async function aiWorkerHint() {
+    if (aiBusy) return
+    setAiBusy('worker')
+    try {
+      const equipmentRow = equipment.find((e) => e.id === values.equipmentId) ?? null
+      let equipmentContext: WorkerEquipmentContext | null = null
+      if (equipmentRow) {
+        const rows = await db.equipmentWorkerStats(equipmentRow.id).catch(() => [])
+        const stats: WorkerEquipmentContext['stats'] = {}
+        for (const r of rows) stats[r.workerId] = { count: r.count, avgScore: r.avgScore }
+        equipmentContext = { equipmentName: equipmentRow.name, stats }
+      }
+      const s = await searchWorker(workers, orders, values.description, equipmentContext)
+      if (s) {
+        onChange({ ...values, workerId: s.worker.id })
+        setAiHint(s.reason)
+      }
+    } catch (err) {
+      setAiHint(err instanceof Error ? err.message : 'ИИ недоступен')
+    } finally {
+      setAiBusy(null)
     }
   }
 
@@ -155,6 +228,38 @@ export default function OrderForm({ data, values, onChange, bigFont, showNumber 
     </Field>
   )
 
+  const shownNorm =
+    values.normHours || (selectedFault?.normHours != null ? String(selectedFault.normHours) : '')
+  const faultBlock = (
+    <Field label="Шифр неисправности (из справочника)">
+      <div className="flex gap-2">
+        <Select value={values.faultCode} onChange={(e) => pickFaultCode(e.target.value)} className="flex-1">
+          <option value="">— выберите шифр —</option>
+          {faultOptions.map((f) => (
+            <option key={f.code} value={f.code}>{f.code} — {f.name}</option>
+          ))}
+        </Select>
+        <Btn variant="ghost" onClick={aiFaultCode} disabled={aiBusy !== null} title="Подсказать шифр через ИИ (NVIDIA NIM)">
+          {aiBusy === 'fault' ? '⏳' : '🤖'}
+        </Btn>
+      </div>
+      <p className="text-xs text-neutral-500">
+        {selectedFault || shownNorm
+          ? [
+              shownNorm ? `Норматив: ${shownNorm} ч` : null,
+              selectedFault?.workType ? WORK_TYPE_LABELS[selectedFault.workType] : null,
+              selectedFault?.materialNorm ? `Материалы: ${selectedFault.materialNorm}` : null,
+            ].filter(Boolean).join(' · ')
+          : 'Выберите шифр из справочника — норматив времени подставится автоматически.'}
+      </p>
+      <p className="text-xs text-neutral-400">
+        М — механические · Э — электрические · Г — гидравлика · П — пневматика · С — смазка.
+        Цифры после буквы — номер шифра в справочнике (например, М-02 — механика, люфт вала).
+        ИИ подбирает шифр по описанию и комментарию задачи.
+      </p>
+    </Field>
+  )
+
   if (big) {
     const step = BIG_STEPS[bigStep]
     return (
@@ -185,6 +290,7 @@ export default function OrderForm({ data, values, onChange, bigFont, showNumber 
             </Select>
           </Field>
         )}
+        {step === 'Шифр неисправности' && <div className="text-xl">{faultBlock}</div>}
         {step === 'Исполнитель' && (
           <Field label="Исполнитель" required>
             <Select value={values.workerId} onChange={(e) => set('workerId', e.target.value)} className="text-2xl">
@@ -195,7 +301,9 @@ export default function OrderForm({ data, values, onChange, bigFont, showNumber 
                 </option>
               ))}
             </Select>
-            <Btn variant="ghost" onClick={aiWorkerHint}>🤖 Предложить ИИ</Btn>
+            <Btn variant="ghost" onClick={aiWorkerHint} disabled={aiBusy !== null}>
+              {aiBusy === 'worker' ? '⏳ Думаю…' : '🤖 Предложить ИИ'}
+            </Btn>
           </Field>
         )}
         {step === 'Срок исполнения' && (
@@ -285,7 +393,9 @@ export default function OrderForm({ data, values, onChange, bigFont, showNumber 
               </option>
             ))}
           </Select>
-          <Btn variant="ghost" onClick={aiWorkerHint}>🤖 Подсказать ИИ</Btn>
+          <Btn variant="ghost" onClick={aiWorkerHint} disabled={aiBusy !== null}>
+            {aiBusy === 'worker' ? '⏳ Думаю…' : '🤖 Подсказать ИИ'}
+          </Btn>
         </div>
       </Field>
 
@@ -293,25 +403,7 @@ export default function OrderForm({ data, values, onChange, bigFont, showNumber 
         <Field label="Срок исполнения" required>
           <TextInput type="datetime-local" value={values.deadline} onChange={(e) => set('deadline', e.target.value)} />
         </Field>
-        <Field label="Шифр неисправности + норматив, ч (ИИ)">
-          <div className="flex gap-2">
-            <TextInput
-              value={values.faultCode}
-              onChange={(e) => set('faultCode', e.target.value)}
-              placeholder="M-02"
-            />
-            <TextInput
-              type="number"
-              min="0"
-              step="0.5"
-              value={values.normHours}
-              onChange={(e) => set('normHours', e.target.value)}
-              placeholder="ч"
-              className="max-w-24"
-            />
-            <Btn variant="ghost" onClick={aiFaultCode}>🤖</Btn>
-          </div>
-        </Field>
+        <div className="sm:col-span-1">{faultBlock}</div>
       </div>
 
       <Field label={`Фото неисправности (${values.photos.length}/5)`}>

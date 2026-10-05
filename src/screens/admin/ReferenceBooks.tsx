@@ -2,13 +2,16 @@
 // Пять модулей: Участки (§2.1), Материалы (§2.2), Оборудование (§2.3),
 // Сотрудники (§2.4), Шифры неисправности (§2.5), + списки нарядов (§2.3/§2.4)
 // и детальный просмотр шифра (§2.5).
+// Все изменения пишутся в БД через db.* (persist → офлайн-очередь).
 
 import { useEffect, useState } from 'react'
 import * as db from '../../lib/db'
-import { WORK_TYPE_LABELS, type FaultCode, type Material, type WorkType } from '../../lib/types'
+import {
+  WORK_TYPE_LABELS, type FaultCode, type Material, type WorkOrder, type WorkType,
+} from '../../lib/types'
 import { Btn, Card, Screen, Select, TextArea, TextInput } from '../../components/ui'
 import OrdersTable from './OrdersTable'
-import type { MasterData, RefBookKey } from './nav'
+import type { AdminData, RefBookKey } from './nav'
 
 // ---------- Раздел (базовый узел навигации) ----------
 
@@ -20,7 +23,7 @@ const BOOKS: Array<{ key: RefBookKey; label: string; hint: string }> = [
   { key: 'faultCodes', label: 'Шифры неисправности', hint: 'Типовые поломки, нормативы, план/внеплан' },
 ]
 
-export function RefBooksHub({ data }: { data: MasterData }) {
+export function RefBooksHub({ data }: { data: AdminData }) {
   return (
     <Screen title="Справочники" subtitle="Разделы администрирования предприятия">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -40,7 +43,7 @@ export function RefBooksHub({ data }: { data: MasterData }) {
   )
 }
 
-export default function ReferenceBooks({ data, book }: { data: MasterData; book: RefBookKey }) {
+export default function ReferenceBooks({ data, book }: { data: AdminData; book: RefBookKey }) {
   switch (book) {
     case 'areas':
       return <AreasModule data={data} />
@@ -81,13 +84,38 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : 'Не удалось сохранить'
 }
 
-function selectedValues(e: React.ChangeEvent<HTMLSelectElement>): string[] {
-  return [...e.target.selectedOptions].map((o) => o.value)
+// ---------- Список чекбоксов (замена <select multiple>) ----------
+// Мультивыбор через <select multiple> требовал удерживать Ctrl и на
+// мобильных не работал вовсе — из-за этого изменения «не сохранялись».
+// Чекбоксы решают это: клик по строке отмечает/снимает элемент.
+
+function CheckList({ options, selected, onToggle, emptyText }: {
+  options: Array<{ id: string; label: string }>
+  selected: string[]
+  onToggle: (id: string) => void
+  emptyText: string
+}) {
+  return (
+    <div className="max-h-44 overflow-y-auto border border-neutral-300 bg-white p-2">
+      {options.length === 0 && <p className="px-1 py-1 text-sm text-neutral-400">{emptyText}</p>}
+      {options.map((o) => (
+        <label key={o.id} className="flex cursor-pointer items-center gap-2 px-1 py-1 text-sm text-neutral-900">
+          <input
+            type="checkbox"
+            checked={selected.includes(o.id)}
+            onChange={() => onToggle(o.id)}
+            className="h-4 w-4 accent-neutral-900"
+          />
+          <span>{o.label}</span>
+        </label>
+      ))}
+    </div>
+  )
 }
 
 // ---------- §2.1 Участки ----------
 
-function AreasModule({ data }: { data: MasterData }) {
+function AreasModule({ data }: { data: AdminData }) {
   const materials = useMaterials()
   const [open, setOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -112,6 +140,10 @@ function AreasModule({ data }: { data: MasterData }) {
     setMIds((materials ?? []).filter((m) => m.areaId === id).map((m) => m.id))
     setError(null)
     setOpen(true)
+  }
+
+  function toggle(list: string[], setList: (v: string[]) => void, id: string) {
+    setList(list.includes(id) ? list.filter((x) => x !== id) : [...list, id])
   }
 
   async function save() {
@@ -163,41 +195,36 @@ function AreasModule({ data }: { data: MasterData }) {
             </label>
             <label className="flex flex-col gap-1 text-sm text-neutral-500">
               Закреплённое оборудование
-              <select
-                multiple
-                size={5}
-                value={eqIds}
-                onChange={(e) => setEqIds(selectedValues(e))}
-                className="w-full border border-neutral-300 bg-white px-2 py-1.5 text-sm focus:border-neutral-900 focus:outline-none"
-              >
-                {data.equipment.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
-              </select>
+              <CheckList
+                options={data.equipment.map((e) => ({ id: e.id, label: e.name }))}
+                selected={eqIds}
+                onToggle={(id) => toggle(eqIds, setEqIds, id)}
+                emptyText="Оборудования пока нет"
+              />
             </label>
             <label className="flex flex-col gap-1 text-sm text-neutral-500">
               Привязанные сотрудники
-              <select
-                multiple
-                size={5}
-                value={wIds}
-                onChange={(e) => setWIds(selectedValues(e))}
-                className="w-full border border-neutral-300 bg-white px-2 py-1.5 text-sm focus:border-neutral-900 focus:outline-none"
-              >
-                {data.workers.map((w) => <option key={w.id} value={w.id}>{w.fullName}</option>)}
-              </select>
+              <CheckList
+                options={data.workers.map((w) => ({ id: w.id, label: w.fullName }))}
+                selected={wIds}
+                onToggle={(id) => toggle(wIds, setWIds, id)}
+                emptyText="Сотрудников пока нет"
+              />
             </label>
-            <label className="flex flex-col gap-1 text-sm text-neutral-500 sm:col-span-2">
+            <div className="flex flex-col gap-1 text-sm text-neutral-500 sm:col-span-1">
               Доступные материалы
-              <select
-                multiple
-                size={5}
-                value={mIds}
-                onChange={(e) => setMIds(selectedValues(e))}
-                className="w-full border border-neutral-300 bg-white px-2 py-1.5 text-sm focus:border-neutral-900 focus:outline-none"
-              >
-                {(materials ?? []).map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
-              </select>
-            </label>
+              <CheckList
+                options={(materials ?? []).map((m) => ({ id: m.id, label: m.name }))}
+                selected={mIds}
+                onToggle={(id) => toggle(mIds, setMIds, id)}
+                emptyText="Материалов пока нет"
+              />
+            </div>
           </div>
+          <p className="mt-2 text-xs text-neutral-500">
+            Подсказка: отметьте нужные элементы галочками — можно выбрать сразу несколько
+            (галочка снимается повторным кликом).
+          </p>
           <div className="mt-3 flex gap-3">
             <Btn onClick={save} disabled={busy}>{busy ? 'Сохраняем…' : 'Сохранить'}</Btn>
             <Btn variant="ghost" onClick={() => setOpen(false)}>Отмена</Btn>
@@ -230,7 +257,7 @@ function AreasModule({ data }: { data: MasterData }) {
 
 // ---------- §2.2 Материалы и запчасти ----------
 
-function MaterialsModule({ data }: { data: MasterData }) {
+function MaterialsModule({ data }: { data: AdminData }) {
   const materials = useMaterials()
   const [rows, setRows] = useState<Material[] | null>(null)
   const [open, setOpen] = useState(false)
@@ -349,7 +376,7 @@ function MaterialsModule({ data }: { data: MasterData }) {
 
 // ---------- §2.3 Оборудование ----------
 
-function EquipmentModule({ data }: { data: MasterData }) {
+function EquipmentModule({ data }: { data: AdminData }) {
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
   const [areaId, setAreaId] = useState('')
@@ -378,7 +405,7 @@ function EquipmentModule({ data }: { data: MasterData }) {
   return (
     <Screen
       title="Оборудование"
-      subtitle="Список обслуживаемых единиц (ТЗ §2.3)"
+      subtitle="Список оборудования (ТЗ §2.3)"
       actions={<Btn onClick={() => { setError(null); setOpen(!open) }}>Добавить оборудование</Btn>}
     >
       {error && <p role="alert" className="border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>}
@@ -424,7 +451,7 @@ function EquipmentModule({ data }: { data: MasterData }) {
 }
 
 /** «Список нарядов по оборудованию» (ТЗ §2.3). */
-export function EquipmentOrders({ data, equipmentId }: { data: MasterData; equipmentId: string }) {
+export function EquipmentOrders({ data, equipmentId }: { data: AdminData; equipmentId: string }) {
   const equipment = data.equipment.find((e) => e.id === equipmentId)
   const orders = data.orders.filter((o) => o.equipmentId === equipmentId)
   return (
@@ -439,7 +466,7 @@ export function EquipmentOrders({ data, equipmentId }: { data: MasterData; equip
 
 // ---------- §2.4 Сотрудники ----------
 
-function WorkersModule({ data }: { data: MasterData }) {
+function WorkersModule({ data }: { data: AdminData }) {
   const [open, setOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [fullName, setFullName] = useState('')
@@ -562,16 +589,52 @@ function WorkersModule({ data }: { data: MasterData }) {
   )
 }
 
-/** «Список нарядов Сотрудника» (ТЗ §2.4). */
-export function WorkerOrders({ data, workerId }: { data: MasterData; workerId: string }) {
+// ---------- Наряды сотрудника: смена + все работы (ТЗ §2.4) ----------
+
+/** Незавершённые работы исполнитель выполняет «сейчас» — они на текущей смене. */
+const SHIFT_ACTIVE: WorkOrder['status'][] = ['accepted', 'in_work', 'suspended', 'rework']
+
+function isSameDay(iso: string, now: Date): boolean {
+  const d = new Date(iso)
+  return (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  )
+}
+
+/** Работа на этой смене: тронута сегодня (выдача/старт/сдача/закрытие) или ещё выполняется. */
+function isOnShift(o: WorkOrder, now: Date): boolean {
+  if (SHIFT_ACTIVE.includes(o.status)) return true
+  return [o.createdAt, o.startedAt, o.completedAt, o.closedAt].some((t) => !!t && isSameDay(t, now))
+}
+
+/** «Список нарядов Сотрудника» (ТЗ §2.4): работы на этой смене + все работы. */
+export function WorkerOrders({ data, workerId }: { data: AdminData; workerId: string }) {
   const worker = data.workers.find((w) => w.id === workerId)
   const orders = data.orders.filter((o) => o.workerId === workerId)
+  const now = new Date()
+  const shift = orders.filter((o) => isOnShift(o, now))
+
   return (
     <Screen
       title={`Наряды: ${worker?.fullName ?? '—'}`}
-      subtitle={`Список нарядов сотрудника (ТЗ §2.4) · всего: ${orders.length}`}
+      subtitle={`Работы на этой смене и все работы сотрудника (ТЗ §2.4) · всего: ${orders.length}`}
     >
-      <OrdersTable data={data} orders={orders} />
+      <div className="flex flex-col gap-2">
+        <h3 className="text-lg font-semibold">Работы на этой смене <span className="text-sm font-normal text-neutral-500">({shift.length})</span></h3>
+        <p className="text-xs text-neutral-500">
+          Смена — с полуночи сегодняшнего дня; незавершённые работы тоже считаются текущей сменой.
+        </p>
+        {shift.length === 0
+          ? <p className="text-sm text-neutral-500">В эту смену работ нет.</p>
+          : <OrdersTable data={data} orders={shift} />}
+      </div>
+
+      <div className="mt-4 flex flex-col gap-2 border-t border-neutral-200 pt-4">
+        <h3 className="text-lg font-semibold">Все работы <span className="text-sm font-normal text-neutral-500">({orders.length})</span></h3>
+        <OrdersTable data={data} orders={orders} />
+      </div>
     </Screen>
   )
 }
@@ -591,7 +654,7 @@ const EMPTY_FAULT_FORM: FaultCodeForm = {
   code: '', name: '', description: '', normHours: '', materialNorm: '', workType: 'unplanned',
 }
 
-function FaultCodesModule({ data }: { data: MasterData }) {
+function FaultCodesModule({ data }: { data: AdminData }) {
   const codes = useFaultCodes()
   const [local, setCodesLocal] = useState<FaultCode[] | null>(null)
   const [open, setOpen] = useState(false)
@@ -692,7 +755,7 @@ function FaultCodesModule({ data }: { data: MasterData }) {
 }
 
 /** Детальный просмотр и редактирование шифра (ТЗ §2.5). */
-export function FaultCodeDetail({ data, code }: { data: MasterData; code: string }) {
+export function FaultCodeDetail({ data, code }: { data: AdminData; code: string }) {
   const codes = useFaultCodes()
   const current = codes?.find((f) => f.code === code) ?? null
   const [form, setForm] = useState<FaultCodeForm | null>(null)
