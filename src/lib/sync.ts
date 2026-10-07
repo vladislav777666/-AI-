@@ -52,10 +52,12 @@ export interface SyncOp {
 
 export type OpRunner = (op: SyncOp) => Promise<void>
 
-/** Сетевая ошибка (очередь продолжает ждать) vs ошибка сервера (нужно вмешательство). */
+/** Сетевая ошибка (очередь продолжает ждать) vs ошибка сервера (нужно вмешательство).
+ *  AuthRetryableFetchError — ошибка auth-js: обрыв сети / 5xx при обновлении
+ *  токена сессии — для пользователя это «нет сети», а не выход из аккаунта. */
 export function isNetworkError(err: unknown): boolean {
   const msg = err instanceof Error ? `${err.name} ${err.message}` : String(err)
-  return /Failed to fetch|NetworkError|network request failed|Load failed|ERR_INTERNET|ERR_NETWORK|ERR_CONNECTION|ECONN|EAI_AGAIN|fetch failed|AbortError|aborted|timed?\s*out|socket hang up/i.test(msg)
+  return /Failed to fetch|NetworkError|network request failed|Load failed|ERR_INTERNET|ERR_NETWORK|ERR_CONNECTION|ECONN|EAI_AGAIN|fetch failed|AbortError|aborted|timed?\s*out|socket hang up|AuthRetryableFetchError/i.test(msg)
 }
 
 function load(): SyncOp[] {

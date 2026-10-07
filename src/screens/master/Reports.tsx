@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { aiTextSummary, type AnomalySummary, type SummaryKind } from '../../lib/ai'
+import { createAnonymizer } from '../../lib/anonymize'
 import { LLM_MODEL, llmConfigured } from '../../lib/llm'
 import * as db from '../../lib/db'
 import {
@@ -489,16 +490,18 @@ function ShiftReportBlock({ data, shift, periodLabel }: {
   shift: ReturnType<typeof shiftReport>
   periodLabel: string
 }) {
+  // PDF §9: во внешнюю модель уходят псевдонимы, не ФИО.
+  const anon = useMemo(() => createAnonymizer(data.workers), [data.workers])
   const facts = useMemo(() => [
     `Выдано нарядов: ${shift.issued}, принято в работу: ${shift.accepted}, закрыто: ${shift.closed}.`,
     `Просрочено: ${shift.overdue}, отклонено исполнителями: ${shift.rejected}, сейчас в работе: ${shift.inWork}.`,
     `Среднее время реакции: ${shift.avgReactionHours?.toFixed(1) ?? '—'} ч, среднее время выполнения: ${shift.avgExecutionHours?.toFixed(1) ?? '—'} ч.`,
     `Простой оборудования за период: ${shift.downtimeHours.toFixed(1)} ч.`,
-    ...shift.staff.slice(0, 3).map((s) => `Загрузка: ${s.worker.fullName} — ${s.hours.toFixed(1)} ч${s.loadPercent != null ? ` (${s.loadPercent.toFixed(0)}%)` : ''}, закрыто ${s.closed}.`),
-  ], [shift])
+    ...shift.staff.slice(0, 3).map((s) => `Загрузка: ${anon.alias(s.worker.id)} — ${s.hours.toFixed(1)} ч${s.loadPercent != null ? ` (${s.loadPercent.toFixed(0)}%)` : ''}, закрыто ${s.closed}.`),
+  ], [shift, anon])
 
   const local = `Правила отчёта за ${periodLabel}: выдано ${shift.issued}, закрыто ${shift.closed}, просрочено ${shift.overdue}, отклонено ${shift.rejected}. Простой: ${shift.downtimeHours.toFixed(1)} ч.`
-  const { state, busy, reload } = useAiSummary('shift', facts, local)
+  const { state, busy, reload } = useAiSummary('shift', facts, local, anon.restore)
 
   return (
     <>
@@ -615,7 +618,7 @@ function AnomaliesReportBlock({ data, equipmentIssues, areas, repeats }: {
 // ---------- Общие блоки ----------
 
 /** ИИ-сводка: считается по фактам, обновляется кнопкой. */
-function useAiSummary(kind: SummaryKind, facts: string[], local: string) {
+function useAiSummary(kind: SummaryKind, facts: string[], local: string, restore?: (text: string) => string) {
   const key = facts.join('\u0000')
   const [state, setState] = useState<AnomalySummary | null>(null)
   const [busy, setBusy] = useState(false)
@@ -623,7 +626,7 @@ function useAiSummary(kind: SummaryKind, facts: string[], local: string) {
   useEffect(() => {
     let alive = true
     setBusy(true)
-    void aiTextSummary(kind, facts, local)
+    void aiTextSummary(kind, facts, local, restore)
       .then((s) => { if (alive) setState(s) })
       .finally(() => { if (alive) setBusy(false) })
     return () => { alive = false }

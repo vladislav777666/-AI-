@@ -33,6 +33,12 @@ export interface DbEquipment {
   /** Участок закрепления; null — оборудование без участка (0009). */
   areaId: string | null
   name: string
+  /** Инвентарный номер (PDF §8, миграция 0010). */
+  inventoryNo?: string | null
+  /** Тип оборудования (PDF §8, миграция 0010). */
+  equipmentType?: string | null
+  /** Критичность (PDF §8, миграция 0010). */
+  criticality?: string | null
 }
 
 export interface DbFaultCode {
@@ -160,6 +166,7 @@ export const migrations = [
   '0007_head_analytics.sql',
   '0008_head_admin_split.sql',
   '0009_equipment_area_nullable.sql',
+  '0010_equipment_attributes.sql',
 ] as const
 
 // ---------- Утилиты маппинга ----------

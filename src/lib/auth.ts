@@ -64,3 +64,25 @@ export async function demoSignInAs(role: Role): Promise<void> {
   demo.demoLogin(role)
   notifyDemo()
 }
+
+/** Тестовые ПИН-коды (PDF §9 п.5 «вход по логину / ПИН-коду»; §12 —
+ *  тестовые учётные записи для защиты). В Supabase-режиме PIN не работает:
+ *  серверной PIN-аутентификации нет (см. отчёт: внешняя зависимость). */
+export const DEMO_PINS: Record<Role, string> = {
+  Master: '1111',
+  Worker: '2222',
+  Head: '3333',
+  Admin: '4444',
+}
+
+/** Вход по ПИН-коду. Возвращает роль или null, если ПИН неверный. */
+export async function signInPin(pin: string): Promise<Role | null> {
+  if (!isDemoMode) {
+    throw new Error('ПИН-код доступен в демо-режиме; в Supabase-входе используйте логин и пароль.')
+  }
+  const role = (Object.keys(DEMO_PINS) as Role[]).find((r) => DEMO_PINS[r] === pin.trim())
+  if (!role) return null
+  demo.demoLogin(role)
+  notifyDemo()
+  return role
+}

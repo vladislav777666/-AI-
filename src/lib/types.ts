@@ -56,6 +56,12 @@ export interface Equipment {
   /** Участок закрепления; null — оборудование не закреплено (ТЗ §2.1). */
   areaId: string | null
   name: string
+  /** Инвентарный номер (PDF §8). */
+  inventoryNo?: string | null
+  /** Тип оборудования (PDF §8). */
+  equipmentType?: string | null
+  /** Критичность (PDF §8); значение хранится как текст (уровни в ТЗ не заданы). */
+  criticality?: string | null
 }
 
 export interface HistoryChange {
@@ -211,16 +217,17 @@ export const ROLE_LABELS: Record<Role, string> = {
 }
 
 export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
-  issued: 'Назначен',
-  accepted: 'Принят',
+  // Подписи — по жизненному циклу PDF §4 («10 статусов»).
+  issued: 'Выдан',
+  accepted: 'Принят в работу',
   in_work: 'В работе',
   queued: 'В очереди',
-  completed: 'На приёмке',
+  completed: 'Проверка ИИ',
   cancelled: 'Отменён',
   suspended: 'Приостановлен',
   closed: 'Закрыт',
   rejected: 'Отклонён',
-  rework: 'На доработке',
+  rework: 'На доработку',
 }
 
 export const PRIORITY_LABELS: Record<Priority, string> = {

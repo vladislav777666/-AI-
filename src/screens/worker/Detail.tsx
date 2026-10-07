@@ -48,7 +48,7 @@ export default function OrderDetail({ ctx, orderId }: { ctx: WorkerCtx; orderId:
           status === 'rejected'
             ? { type: 'REJECTED', title: `Наряд ${order!.number} отклонён`, message: `Исполнитель отклонил наряд: ${reason ?? ''}` }
             : status === 'completed'
-              ? { type: 'ACCEPTANCE', title: `Наряд ${order!.number} на приёмке`, message: 'Исполнитель отправил работы на приёмку.' }
+              ? { type: 'ACCEPTANCE', title: `Наряд ${order!.number}: проверка ИИ`, message: 'Исполнитель отправил работы: наряд принят на проверку ИИ.' }
               : undefined,
       })
       setModal(null)
@@ -203,7 +203,7 @@ export default function OrderDetail({ ctx, orderId }: { ctx: WorkerCtx; orderId:
         {order.status === 'completed' && (
           <Card className="border-green-600 bg-green-50">
             <p className="text-sm font-medium text-green-800">
-              На приёмке: наряд ожидает проверки Мастером. Изменение данных недоступно.
+              Проверка ИИ: наряд ожидает решения Мастера по итогам проверки. Изменение данных недоступно.
             </p>
           </Card>
         )}

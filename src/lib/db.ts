@@ -25,18 +25,43 @@ import type { Acceptance as DbAcceptance } from './types'
 export async function getProfile(): Promise<Profile | null> {
   const sb = supabase
   if (!isSupabaseConfigured || !sb) return demo.demoGetProfile()
-  return readThrough('profile', async () => {
-    const { data: userData } = await sb.auth.getUser()
-    if (!userData.user) return null
-    const { data, error } = await sb
-      .from('profiles')
-      .select('id, role, full_name')
-      .eq('id', userData.user.id)
-      .maybeSingle()
-    if (error) throw new Error(error.message)
-    if (!data) return null
-    return { id: data.id, role: data.role, fullName: data.full_name ?? '' }
-  })
+  // Вход «запоминается»: сессия Supabase хранится в localStorage, поэтому
+  // локальная сессия читается без сети — аккаунт не теряется при перезагрузке
+  // и в офлайне. Профиль берём из БД, при обрыве сети — из кэша
+  // последнего успешного чтения (offline.readThrough).
+  try {
+    const { data: sessionData, error: sessionError } = await sb.auth.getSession()
+    if (sessionError) {
+      // Нет сети при обновлении токена — не выкидываем из аккаунта: кэш профиля.
+      // Прочие ошибки (сессия отозвана и т.п.) — настоящий выход.
+      if (isNetworkError(sessionError)) return cacheGet<Profile>('profile')
+      return null
+    }
+    const session = sessionData.session
+    if (!session) return null
+    return await readThrough('profile', async () => {
+      const { data, error } = await sb
+        .from('profiles')
+        .select('id, role, full_name')
+        .eq('id', session.user.id)
+        .maybeSingle()
+      if (error) throw new Error(error.message)
+      if (!data) return null
+      return { id: data.id, role: data.role, fullName: data.full_name ?? '' }
+    })
+  } catch (err) {
+    // Обрыв сети (в т.ч. при чтении профиля) — остаёмся в аккаунте по кэшу.
+    if (isNetworkError(err)) {
+      const cached = cacheGet<Profile>('profile')
+      if (cached) return cached
+    }
+    throw err
+  }
+}
+
+/** Закэшированный профиль — для восстановления сессии, если проверка не удалась. */
+export function cachedProfile(): Profile | null {
+  return cacheGet<Profile>('profile')
 }
 
 // ---------- Исполнители ----------
@@ -190,28 +215,50 @@ export async function listEquipment(): Promise<Equipment[]> {
   if (!isSupabaseConfigured || !sb) return demo.demoListEquipment()
   return readThrough('equipment', async () => {
     const { data, error } = await sb
-      .from('equipment').select('id, area_id, name').order('name')
+      .from('equipment')
+      .select('id, area_id, name, inventory_no, equipment_type, criticality')
+      .order('name')
     if (error) throw new Error(error.message)
-    return (data ?? []).map((e) => ({ id: e.id, areaId: e.area_id ?? null, name: e.name }))
+    return (data ?? []).map((e) => ({
+      id: e.id,
+      areaId: e.area_id ?? null,
+      name: e.name,
+      inventoryNo: e.inventory_no ?? null,
+      equipmentType: e.equipment_type ?? null,
+      criticality: e.criticality ?? null,
+    }))
   })
 }
 
-/** Добавление оборудования: Название + Участок (ТЗ §2.3). */
-export async function createEquipment(name: string, areaId: string): Promise<void> {
-  if (!isSupabaseConfigured || !supabase) return demo.demoCreateEquipment(name, areaId)
+/** Атрибуты оборудования из PDF §8 (инвентарный номер, тип, критичность). */
+export type EquipmentAttrs = Pick<Equipment, 'inventoryNo' | 'equipmentType' | 'criticality'>
+
+/** Добавление оборудования: Название + Участок + атрибуты PDF §8 (ТЗ §2.3). */
+export async function createEquipment(name: string, areaId: string, attrs?: EquipmentAttrs): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return demo.demoCreateEquipment(name, areaId, attrs)
   const id = uid()
   return persist(
-    { fn: 'createEquipment', args: [name, areaId, id] },
-    () => createEquipmentDirect(name, areaId, id),
+    { fn: 'createEquipment', args: [name, areaId, id, attrs] },
+    () => createEquipmentDirect(name, areaId, id, attrs),
     () => undefined,
   )
 }
 
-async function createEquipmentDirect(name: string, areaId: string, id: string): Promise<void> {
+async function createEquipmentDirect(name: string, areaId: string, id: string, attrs?: EquipmentAttrs): Promise<void> {
   const sb = supabase
   if (!sb) throw new Error('Supabase не настроен')
   const { error } = await sb.from('equipment')
-    .upsert({ id, name, area_id: areaId }, { onConflict: 'id', ignoreDuplicates: true })
+    .upsert(
+      {
+        id,
+        name,
+        area_id: areaId,
+        inventory_no: attrs?.inventoryNo ?? null,
+        equipment_type: attrs?.equipmentType ?? null,
+        criticality: attrs?.criticality ?? null,
+      },
+      { onConflict: 'id', ignoreDuplicates: true },
+    )
   if (error) throw new Error(error.message)
 }
 
@@ -1113,7 +1160,8 @@ const DB_OPS: Record<DbFnName, (...args: any[]) => Promise<unknown>> = {
     saveAcceptanceDirect(orderId, data, actor),
   createArea: (name: string, id: string) => createAreaDirect(name, id),
   updateArea: (id: string, name: string) => updateAreaDirect(id, name),
-  createEquipment: (name: string, areaId: string, id: string) => createEquipmentDirect(name, areaId, id),
+  createEquipment: (name: string, areaId: string, id: string, attrs?: EquipmentAttrs) =>
+    createEquipmentDirect(name, areaId, id, attrs),
   updateEquipment: (id: string, areaId: string | null) => updateEquipmentDirect(id, areaId),
   createWorker: (input: WorkerCardInput, id: string) => createWorkerDirect(input, id),
   updateWorker: (id: string, patch: Partial<WorkerCardInput>) => updateWorkerDirect(id, patch),
@@ -1164,5 +1212,31 @@ export async function runQueuedOp(op: SyncOp, defaultActor = 'Система'): 
       return
     }
     await updateOrderDirect(op.entityId, op.payload.patch, actor, action)
+  }
+}
+
+/**
+ * Подписка на изменения данных в реальном времени
+ * (PDF §9 п.3: обновление статусов не дольше 5 секунд, WebSocket или аналог):
+ *  • Supabase — postgres_changes по всем таблицам схемы public
+ *    (требуется включение Realtime для таблиц в проекте Supabase);
+ *  • демо-режим — событие storage (правка в соседней вкладке).
+ * Возвращает функцию отписки.
+ */
+export function subscribeRealtime(onChange: () => void): () => void {
+  const sb = supabase
+  if (!isSupabaseConfigured || !sb) {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === demo.KEY) onChange()
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }
+  const channel = sb
+    .channel('realtime-db')
+    .on('postgres_changes', { event: '*', schema: 'public' }, () => onChange())
+    .subscribe()
+  return () => {
+    void sb.removeChannel(channel)
   }
 }

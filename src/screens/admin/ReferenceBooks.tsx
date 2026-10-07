@@ -395,6 +395,10 @@ function EquipmentModule({ data }: { data: AdminData }) {
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
   const [areaId, setAreaId] = useState('')
+  // Атрибуты PDF §8: инвентарный номер, тип, критичность.
+  const [inv, setInv] = useState('')
+  const [eqType, setEqType] = useState('')
+  const [crit, setCrit] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -404,9 +408,13 @@ function EquipmentModule({ data }: { data: AdminData }) {
     if (!areaId) { setError('Выберите участок'); return }
     setBusy(true); setError(null)
     try {
-      await db.createEquipment(trimmed, areaId)
+      await db.createEquipment(trimmed, areaId, {
+        inventoryNo: inv.trim() || null,
+        equipmentType: eqType.trim() || null,
+        criticality: crit.trim() || null,
+      })
       await data.refresh()
-      setName(''); setOpen(false)
+      setName(''); setInv(''); setEqType(''); setCrit(''); setOpen(false)
     } catch (err) {
       setError(errorText(err))
     } finally {
@@ -451,6 +459,18 @@ function EquipmentModule({ data }: { data: AdminData }) {
                 {data.areas.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
               </Select>
             </label>
+            <label className="flex flex-col gap-1 text-sm text-neutral-500">
+              Инвентарный номер
+              <TextInput value={inv} onChange={(e) => setInv(e.target.value)} placeholder="INV-0101" />
+            </label>
+            <label className="flex flex-col gap-1 text-sm text-neutral-500">
+              Тип оборудования
+              <TextInput value={eqType} onChange={(e) => setEqType(e.target.value)} placeholder="Насосы" />
+            </label>
+            <label className="flex flex-col gap-1 text-sm text-neutral-500">
+              Критичность
+              <TextInput value={crit} onChange={(e) => setCrit(e.target.value)} placeholder="Высокая / Средняя / Низкая" />
+            </label>
           </div>
           <div className="mt-3 flex gap-3">
             <Btn onClick={save} disabled={busy}>{busy ? 'Сохраняем…' : 'Сохранить'}</Btn>
@@ -465,6 +485,11 @@ function EquipmentModule({ data }: { data: AdminData }) {
           <Card key={e.id} onClick={() => data.go({ screen: 'equipmentOrders', equipmentId: e.id })}>
             <div className="flex flex-wrap items-center gap-3">
               <span className="font-medium">{e.name}</span>
+              {(e.inventoryNo || e.equipmentType || e.criticality) && (
+                <span className="text-xs text-neutral-500">
+                  {[e.inventoryNo, e.equipmentType, e.criticality].filter(Boolean).join(' · ')}
+                </span>
+              )}
               {/* Участок меняется прямо в списке: карточка ведёт к нарядам,
                   поэтому клики по селекту не должны её открывать. */}
               <span

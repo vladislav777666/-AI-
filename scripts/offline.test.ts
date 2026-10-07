@@ -194,6 +194,40 @@ check(sync.isNetworkError(netErr()), 'isNetworkError: TypeError Failed to fetch'
 check(sync.isNetworkError(new Error('Load failed')), 'isNetworkError: Load failed')
 check(!sync.isNetworkError(srvErr()), 'isNetworkError: ошибка сервера — не сетевая')
 check(!sync.isNetworkError(new Error('Недопустимый переход')), 'isNetworkError: ошибка валидации — не сетевая')
+// Ошибки auth-js при обновлении токена — это «нет сети», а не выход из аккаунта
+// (getProfile в таком случае остаётся на кэше профиля, а не показывает Login).
+const authNetErr = new Error('Failed to fetch')
+authNetErr.name = 'AuthRetryableFetchError'
+check(sync.isNetworkError(authNetErr), 'isNetworkError: AuthRetryableFetchError (обрыв сети)')
+const auth5xxErr = new Error('Service Unavailable')
+auth5xxErr.name = 'AuthRetryableFetchError'
+check(sync.isNetworkError(auth5xxErr), 'isNetworkError: AuthRetryableFetchError (5xx, ретраится)')
+
+// 13. Обезличивание ФИО перед отправкой во внешний ИИ (PDF §9: персональные
+// данные сотрудников не передаются во внешние сервисы без обезличивания).
+const anon = await import('../src/lib/anonymize')
+const a = anon.createAnonymizer([
+  { id: 'w1', fullName: 'Иванов И.И.' },
+  { id: 'w2', fullName: 'Петров П.П.' },
+])
+check(a.alias('w1') === 'Сотрудник-01', 'anonymize: псевдоним первого сотрудника')
+check(a.alias('w2') === 'Сотрудник-02', 'anonymize: псевдоним второго сотрудника')
+check(a.alias(null) === '—' && a.alias('чужой') === '—', 'anonymize: неизвестный id → «—»')
+check(!a.alias('w1').includes('Иванов'), 'anonymize: псевдоним не содержит ФИО')
+check(
+  a.restore('Лучше Сотрудник-02, он свободен') === 'Лучше Петров П.П., он свободен',
+  'anonymize: restore возвращает ФИО в ответе модели',
+)
+// Модель любит неразрывный дефис (U+2011) — ФИО должны восстанавливаться и так.
+check(
+  a.restore('Свободных электриков нет: Сотрудник‑02 (в работе).')
+    === 'Свободных электриков нет: Петров П.П. (в работе).',
+  'anonymize: restore терпит неразрывный дефис U+2011',
+)
+check(
+  a.restore('Сотрудник \u2013 01 свободен') === 'Иванов И.И. свободен',
+  'anonymize: restore терпит тире и пробелы вокруг',
+)
 
 // ---------- Итог ----------
 

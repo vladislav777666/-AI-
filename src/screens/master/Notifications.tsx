@@ -3,10 +3,11 @@
 //   • Просроченный наряд (принят, но срок прошёл) — «Просрочен на: X»:
 //     клик открывает наряд сразу на окне истории (§4.3);
 //   • Наряд не принят / аварийный наряд не принят — «Приоритет: Y»:
-//     клик открывает окно «детали наряда / замена исполнителя»;
+//     клик открывает окно «детали наряда / замена исполнителя». Порог эскалации
+//     по PDF §6.1 п.4: не принят за 10 минут (аварийный — за 3 минуты);
 //   • Повторная задержка по наряду — «Не принят уже: X», «Приоритет: Y»:
-//     клик открывает то же окно (первое напоминание уже прошло — эскалация
-//     по сроку ожидания: аварийный — 15 мин, высокий — 30, обычный — 60,
+//     клик открывает то же окно; повторные напоминания через заданный
+//     интервал (§6.1 п.5): аварийный — 15 мин, высокий — 30, обычный — 60,
 //     плановый — 120).
 //
 // Ниже карточек — лента последних событий по всем нарядам.
@@ -22,7 +23,16 @@ import type { MasterData } from './nav'
 
 type Entry = Awaited<ReturnType<typeof db.recentHistory>>[number]
 
-/** Порог эскалации «не принят» → «повторная задержка», по приоритету. */
+/** Порог эскалации «не принят» → мастеру (PDF §6.1 п.4): 10 минут,
+ *  аварийный наряд — 3 минуты. */
+const ESCALATE_AFTER_MS: Record<Priority, number> = {
+  emergency: 3 * 60_000,
+  high: 10 * 60_000,
+  normal: 10 * 60_000,
+  planned: 10 * 60_000,
+}
+
+/** Интервал повторных напоминаний после первой эскалации (§6.1 п.5). */
 const REPEAT_AFTER_MS: Record<Priority, number> = {
   emergency: 15 * 60_000,
   high: 30 * 60_000,
@@ -59,11 +69,14 @@ function collectIncidents(orders: WorkOrder[], now: number): Incident[] {
       out.push({ kind: 'overdue', order: o, ms: now - new Date(o.deadline).getTime() })
       continue
     }
-    // Назначен, но не принят исполнителем.
+    // Назначен, но не принят исполнителем: до порога эскалации (10/3 мин)
+    // инцидента нет — как в PDF §6.1 п.4.
     if (o.status === 'issued') {
       const waited = now - new Date(o.createdAt).getTime()
+      const escalateAfter = ESCALATE_AFTER_MS[o.priority]
+      if (waited < escalateAfter) continue
       out.push({
-        kind: waited >= REPEAT_AFTER_MS[o.priority] ? 'repeat' : 'not_accepted',
+        kind: waited >= escalateAfter + REPEAT_AFTER_MS[o.priority] ? 'repeat' : 'not_accepted',
         order: o,
         ms: waited,
       })

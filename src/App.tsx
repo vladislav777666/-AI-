@@ -26,7 +26,10 @@ export default function App() {
       const profile = await db.getProfile()
       setSession(profile ? { state: 'authed', profile } : { state: 'anon' })
     } catch {
-      setSession({ state: 'anon' })
+      // Сбой проверки сессии (например, нет сети) — не повод показывать экран
+      // входа: берём профиль из кэша последнего успешного входа.
+      const cached = db.cachedProfile()
+      setSession(cached ? { state: 'authed', profile: cached } : { state: 'anon' })
     }
   }
 

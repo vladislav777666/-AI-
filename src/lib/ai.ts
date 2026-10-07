@@ -3,6 +3,7 @@
 // ответы даёт реальная модель (см. llm.ts); без ключа или при ошибке сети
 // работают локальные эвристики ниже — они же мгновенный фоллбэк.
 
+import { createAnonymizer } from './anonymize'
 import { LLM_MODEL, llmChat, llmConfigured, llmJson } from './llm'
 import {
   WORKER_STATUS_LABELS,
@@ -312,6 +313,9 @@ export async function searchWorker(
 ): Promise<WorkerSuggestion | null> {
   if (llmConfigured && workers.length > 0) {
     try {
+      // PDF §9: во внешнюю модель уходят только псевдонимы, ФИО восстанавливаем
+      // в ответе модели локально (см. anonymize.ts).
+      const anon = createAnonymizer(workers)
       const roster = workers
         .map((w) => {
           const open = orders.filter(
@@ -334,7 +338,7 @@ export async function searchWorker(
           ]
             .filter(Boolean)
             .join(', ')
-          return `${w.id} — ${w.fullName} (${bits})`
+          return `${w.id} — ${anon.alias(w.id)} (${bits})`
         })
         .join('\n')
       const res = await llmJson<{ workerId?: unknown; reason?: unknown }>({
@@ -360,7 +364,7 @@ export async function searchWorker(
           : ''
         return {
           worker,
-          reason: `ИИ (${LLM_MODEL}): ${reason || worker.fullName}.`,
+          reason: `ИИ (${LLM_MODEL}): ${anon.restore(reason) || worker.fullName}.`,
         }
       }
     } catch {
@@ -502,6 +506,7 @@ export async function aiTextSummary(
   kind: SummaryKind,
   facts: string[],
   local: string,
+  restore?: (text: string) => string,
 ): Promise<AnomalySummary> {
   if (!llmConfigured || facts.length === 0) return { text: local, source: 'local' }
   try {
@@ -515,7 +520,9 @@ export async function aiTextSummary(
     const text = typeof res.summary === 'string'
       ? res.summary.replace(/\s*\n+\s*/g, ' ').trim()
       : ''
-    if (text) return { text: `ИИ (${LLM_MODEL}): ${text}`, source: 'nim' }
+    // restore возвращает настоящие ФИО в ответе модели: в промпт они не уходили
+    // (PDF §9) — внешней модели переданы только псевдонимы.
+    if (text) return { text: `ИИ (${LLM_MODEL}): ${restore ? restore(text) : text}`, source: 'nim' }
   } catch {
     // модель недоступна — отдаём локальную сводку
   }

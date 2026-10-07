@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react'
 import {
   isOverdue, ORDER_STATUS_LABELS, PRIORITY_LABELS, STATUS_FILTER_LABELS,
-  type Priority, type StatusFilter,
+  type Priority, type StatusFilter, type WorkOrder,
 } from '../../lib/types'
 import { Card, Screen, Select, StatusDot, TextInput } from '../../components/ui'
 import type { MasterData } from './nav'
@@ -19,6 +19,23 @@ const STATUS_COLORS: Record<string, string> = {
   closed: 'bg-green-700',
 }
 
+/** Доска нарядов по статусам (PDF §5.2 п.2): ровно 6 колонок канбана.
+ *  Просроченные — отдельная колонка (дублей со статусными не делаем):
+ *  остальные статусы (отклонён, приостановлен, доработка, закрыт, отменён)
+ *  видны в списке. */
+const BOARD_COLUMNS: Array<{
+  key: string
+  title: string
+  match: (o: WorkOrder, overdue: boolean) => boolean
+}> = [
+  { key: 'issued', title: 'Выданные', match: (o, od) => o.status === 'issued' && !od },
+  { key: 'accepted', title: 'Принятые', match: (o, od) => o.status === 'accepted' && !od },
+  { key: 'in_work', title: 'В работе', match: (o, od) => o.status === 'in_work' && !od },
+  { key: 'queued', title: 'В очереди', match: (o, od) => o.status === 'queued' && !od },
+  { key: 'completed', title: 'Выполненные', match: (o, od) => o.status === 'completed' && !od },
+  { key: 'overdue', title: 'Просроченные', match: (_o, od) => od },
+]
+
 export default function Orders({ data, presetStatus = 'all' }: {
   data: MasterData
   presetStatus?: StatusFilter
@@ -29,6 +46,7 @@ export default function Orders({ data, presetStatus = 'all' }: {
   const [equipmentId, setEquipmentId] = useState('')
   const [priority, setPriority] = useState('')
   const [code, setCode] = useState('')
+  const [view, setView] = useState<'list' | 'board'>('list')
 
   const filtered = useMemo(() => {
     return data.orders.filter((o) => {
@@ -105,6 +123,74 @@ export default function Orders({ data, presetStatus = 'all' }: {
 
   return (
     <Screen title="Наряды" subtitle={`Найдено: ${filtered.length} из ${data.orders.length}`}>
+      <div className="flex gap-2" role="group" aria-label="Вид нарядов">
+        {([
+          { key: 'list', label: 'Список' },
+          { key: 'board', label: 'Доска (канбан)' },
+        ] as const).map((v) => (
+          <button
+            key={v.key}
+            type="button"
+            aria-pressed={view === v.key}
+            onClick={() => setView(v.key)}
+            className={`border px-3 py-1.5 text-sm font-medium transition-colors ${
+              view === v.key
+                ? 'border-neutral-900 bg-neutral-900 text-white'
+                : 'border-neutral-300 hover:border-neutral-900'
+            }`}
+          >
+            {v.label}
+          </button>
+        ))}
+      </div>
+
+      {view === 'board' ? (
+        <>
+          <div className="flex gap-3 overflow-x-auto pb-2">
+            {BOARD_COLUMNS.map((col) => {
+              const items = filtered.filter((o) => col.match(o, isOverdue(o)))
+              return (
+                <div key={col.key} className="min-w-44 flex-1 border border-neutral-200 bg-neutral-50 p-2">
+                  <p className="mb-2 flex items-baseline gap-1 text-xs font-semibold uppercase text-neutral-500">
+                    {col.title}
+                    <span className="font-normal normal-case text-neutral-400">{items.length}</span>
+                  </p>
+                  <div className="flex flex-col gap-2">
+                    {items.length === 0 && (
+                      <p className="text-xs text-neutral-400">Пусто</p>
+                    )}
+                    {items.map((o) => (
+                      <button
+                        key={o.id}
+                        type="button"
+                        onClick={() => data.go({ screen: 'order', id: o.id })}
+                        className="border border-neutral-200 bg-white p-2 text-left transition-colors hover:border-neutral-900"
+                      >
+                        <span className="flex items-center gap-1.5 text-sm font-medium">
+                          <StatusDot color={STATUS_COLORS[o.status]} />
+                          {o.number}
+                        </span>
+                        <p className="mt-1 truncate text-xs text-neutral-500">{equipmentName(o.equipmentId)}</p>
+                        <p className="truncate text-xs text-neutral-500">{workerName(o.workerId)}</p>
+                        <p className="mt-1 flex flex-wrap gap-1 text-[10px]">
+                          <span className="border border-neutral-300 px-1">{PRIORITY_LABELS[o.priority]}</span>
+                          {isOverdue(o) && (
+                            <span className="border border-red-600 px-1 text-red-600">Просрочен</span>
+                          )}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+          <p className="text-xs text-neutral-500">
+            Отклонённые, приостановленные и наряды на доработке — в списке; закрытые — в отчётах.
+          </p>
+        </>
+      ) : (
+        <>
       <details className="group">
         <summary className="cursor-pointer border border-neutral-900 px-4 py-2 text-sm font-medium hover:bg-neutral-900 hover:text-white">
           Фильтры
@@ -140,6 +226,8 @@ export default function Orders({ data, presetStatus = 'all' }: {
           </Card>
         ))}
       </div>
+        </>
+      )}
     </Screen>
   )
 }

@@ -121,7 +121,7 @@ export const NOTIFICATION_LABELS: Record<NotificationType, string> = {
   DEADLINE_APPROACH: 'Приближение срока',
   OVERDUE: 'Просрочка',
   REWORK: 'Возврат на доработку',
-  ACCEPTANCE: 'На приёмке',
+  ACCEPTANCE: 'Проверка ИИ',
   RATED: 'Выставлена оценка',
   STATUS_CHANGED: 'Изменение статуса',
   REJECTED: 'Наряд отклонён',

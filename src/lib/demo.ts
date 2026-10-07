@@ -3,10 +3,10 @@
 
 import type {
   Acceptance, Area, ChecklistItem, Equipment, FaultCode, HistoryChange, HistoryEntry,
-  Material, MaterialItem, NewOrderInput, Notification, Profile, WorkOrder, Worker, WorkerStatus,
+  Material, MaterialItem, NewOrderInput, Notification, Priority, Profile, WorkOrder, Worker, WorkerStatus,
 } from './types'
 
-const KEY = 'master-module-demo-v1'
+export const KEY = 'master-module-demo-v1'
 
 interface DemoStore {
   profile: Profile | null
@@ -25,38 +25,215 @@ interface DemoStore {
   analyticsSeeded?: boolean
   /** Однократная досыпка истории нарядов (§4.3) для старых хранилищ. */
   historySeeded?: boolean
+  /** Однократная досыпка до 500+ нарядов за 3 месяца (PDF §8). */
+  bulkSeeded?: boolean
 }
 
 function uid(): string {
   return crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now()}-${Math.random()}`
 }
 
+// ---------- Тестовый набор PDF §8: 4 участка, 25 единиц оборудования,
+// 15 исполнителей в 3 бригадах, 40 позиций материалов, 20 шифров, 500+ нарядов.
+
+const AREA_NAMES = [
+  'Дробление',
+  'Обогащение',
+  'Ремонтно-механический цех',
+  'Энергетический участок',
+] as const
+
+interface EqSeed {
+  name: string
+  inventoryNo: string
+  equipmentType: string
+  criticality: string
+  area: number
+}
+
+/** 25 единиц оборудования (PDF §8); названия «Дробилка КМД-1750» и
+ *  «Конвейер К-3» совпадают с эталонными примерами §6.1/§6.5. */
+const EQUIPMENT_SEED: EqSeed[] = [
+  // Дробление
+  { name: 'Дробилка КМД-1750', inventoryNo: 'INV-0101', equipmentType: 'Дробильная техника', criticality: 'Высокая', area: 0 },
+  { name: 'Грохот вибрационный ГИС-1230', inventoryNo: 'INV-0102', equipmentType: 'Грохоты', criticality: 'Высокая', area: 0 },
+  { name: 'Конвейер К-3', inventoryNo: 'INV-0103', equipmentType: 'Конвейеры', criticality: 'Высокая', area: 0 },
+  { name: 'Конвейер К-7', inventoryNo: 'INV-0104', equipmentType: 'Конвейеры', criticality: 'Средняя', area: 0 },
+  { name: 'Питатель вибрационный ПВ-90', inventoryNo: 'INV-0105', equipmentType: 'Питатели', criticality: 'Средняя', area: 0 },
+  { name: 'Сито грохот СГ-150', inventoryNo: 'INV-0106', equipmentType: 'Грохоты', criticality: 'Низкая', area: 0 },
+  // Обогащение
+  { name: 'Флотомашина ФМ-10', inventoryNo: 'INV-0201', equipmentType: 'Флотомашины', criticality: 'Средняя', area: 1 },
+  { name: 'Сепаратор С-4М', inventoryNo: 'INV-0202', equipmentType: 'Сепараторы', criticality: 'Средняя', area: 1 },
+  { name: 'Насос ИЦ-100-50', inventoryNo: 'INV-0203', equipmentType: 'Насосы', criticality: 'Высокая', area: 1 },
+  { name: 'Конвейер К-12', inventoryNo: 'INV-0204', equipmentType: 'Конвейеры', criticality: 'Средняя', area: 1 },
+  { name: 'Мельница МШЦ-3200', inventoryNo: 'INV-0205', equipmentType: 'Мельницы', criticality: 'Высокая', area: 1 },
+  { name: 'Гидроциклон ГЦ-500', inventoryNo: 'INV-0206', equipmentType: 'Гидроциклоны', criticality: 'Низкая', area: 1 },
+  // Ремонтно-механический цех
+  { name: 'Станок ЧПУ-1', inventoryNo: 'INV-0301', equipmentType: 'Металлорежущие станки', criticality: 'Средняя', area: 2 },
+  { name: 'Станок токарный 16К20', inventoryNo: 'INV-0302', equipmentType: 'Металлорежущие станки', criticality: 'Средняя', area: 2 },
+  { name: 'Станок фрезерный 6М82Г', inventoryNo: 'INV-0303', equipmentType: 'Металлорежущие станки', criticality: 'Средняя', area: 2 },
+  { name: 'Пресс гидравлический 1600 кН', inventoryNo: 'INV-0304', equipmentType: 'Прессы', criticality: 'Высокая', area: 2 },
+  { name: 'Компрессор ВП-2', inventoryNo: 'INV-0305', equipmentType: 'Компрессоры', criticality: 'Высокая', area: 2 },
+  { name: 'Сварочный трансформатор ВД-306', inventoryNo: 'INV-0306', equipmentType: 'Сварочное оборудование', criticality: 'Низкая', area: 2 },
+  { name: 'Кран-балка 3,2 т', inventoryNo: 'INV-0307', equipmentType: 'Грузоподъёмное', criticality: 'Высокая', area: 2 },
+  // Энергетический участок
+  { name: 'Трансформатор ТМ-1000', inventoryNo: 'INV-0401', equipmentType: 'Электрооборудование', criticality: 'Высокая', area: 3 },
+  { name: 'Распределительный щит ЩС-0,4', inventoryNo: 'INV-0402', equipmentType: 'Электрооборудование', criticality: 'Средняя', area: 3 },
+  { name: 'Насос центробежный НЦ-65', inventoryNo: 'INV-0403', equipmentType: 'Насосы', criticality: 'Средняя', area: 3 },
+  { name: 'Вентилятор ВЦ-14', inventoryNo: 'INV-0404', equipmentType: 'Вентиляция', criticality: 'Низкая', area: 3 },
+  { name: 'Генератор ДГ-100', inventoryNo: 'INV-0405', equipmentType: 'Электрооборудование', criticality: 'Высокая', area: 3 },
+  { name: 'Компрессор КС-18', inventoryNo: 'INV-0406', equipmentType: 'Компрессоры', criticality: 'Средняя', area: 3 },
+]
+
+interface WorkerSeed {
+  userId: string
+  fullName: string
+  specialty: string
+  rank: string
+  brigade: string
+  area: number
+  status: WorkerStatus
+  rating: number
+}
+
+/** 15 исполнителей в 3 бригадах (PDF §8). */
+const WORKER_SEED: WorkerSeed[] = [
+  { userId: 'demo-worker-1', fullName: 'Типо Исполнитель', specialty: 'Слесарь', rank: '4 разряд', brigade: 'Бригада №1', area: 0, status: 'free', rating: 4.6 },
+  { userId: 'demo-worker-2', fullName: 'Иванов И.И.', specialty: 'Электрик', rank: '5 разряд', brigade: 'Бригада №2', area: 0, status: 'busy', rating: 4.2 },
+  { userId: 'demo-worker-3', fullName: 'Петров П.П.', specialty: 'Механик', rank: '3 разряд', brigade: 'Бригада №3', area: 1, status: 'not_on_shift', rating: 3.9 },
+  { userId: 'demo-worker-4', fullName: 'Сидоров С.С.', specialty: 'Сварщик', rank: '5 разряд', brigade: 'Бригада №1', area: 2, status: 'free', rating: 4.8 },
+  { userId: 'demo-worker-5', fullName: 'Ким А.В.', specialty: 'Оператор дробильной установки', rank: '4 разряд', brigade: 'Бригада №1', area: 0, status: 'queue', rating: 4.1 },
+  { userId: 'demo-worker-6', fullName: 'Ахметов Е.С.', specialty: 'Слесарь по ремонту машин', rank: '4 разряд', brigade: 'Бригада №2', area: 1, status: 'free', rating: 3.6 },
+  { userId: 'demo-worker-7', fullName: 'Оспанов О.О.', specialty: 'Электромонтёр', rank: '4 разряд', brigade: 'Бригада №3', area: 3, status: 'busy', rating: 4.4 },
+  { userId: 'demo-worker-8', fullName: 'Мельников М.М.', specialty: 'Слесарь-сантехник', rank: '3 разряд', brigade: 'Бригада №2', area: 1, status: 'free', rating: 4.0 },
+  { userId: 'demo-worker-9', fullName: 'Гаврилов Г.Г.', specialty: 'Механик', rank: '5 разряд', brigade: 'Бригада №1', area: 2, status: 'queue', rating: 4.7 },
+  { userId: 'demo-worker-10', fullName: 'Нурланов Н.Н.', specialty: 'Оператор сепараторов', rank: '3 разряд', brigade: 'Бригада №3', area: 1, status: 'free', rating: 3.8 },
+  { userId: 'demo-worker-11', fullName: 'Фёдоров Ф.Ф.', specialty: 'Электрик', rank: '4 разряд', brigade: 'Бригада №2', area: 3, status: 'not_on_shift', rating: 4.3 },
+  { userId: 'demo-worker-12', fullName: 'Тлеуов Т.Т.', specialty: 'Стропальщик', rank: '3 разряд', brigade: 'Бригада №1', area: 2, status: 'free', rating: 4.5 },
+  { userId: 'demo-worker-13', fullName: 'Захаров З.З.', specialty: 'Слесарь КИПиА', rank: '4 разряд', brigade: 'Бригада №3', area: 3, status: 'busy', rating: 4.2 },
+  { userId: 'demo-worker-14', fullName: 'Саинов С.С.', specialty: 'Оператор мельницы', rank: '4 разряд', brigade: 'Бригада №2', area: 1, status: 'free', rating: 3.7 },
+  { userId: 'demo-worker-15', fullName: 'Дьяченко Д.Д.', specialty: 'Слесарь-ремонтник', rank: '5 разряд', brigade: 'Бригада №1', area: 0, status: 'queue', rating: 4.9 },
+]
+
+/** 40 позиций материалов и запчастей (PDF §8). */
+const MATERIAL_SEED: Array<{ name: string; qty: number; unit: string; area: number }> = [
+  { name: 'Подшипник 6205', qty: 24, unit: 'шт', area: 0 },
+  { name: 'Подшипник 6206', qty: 18, unit: 'шт', area: 0 },
+  { name: 'Подшипник 36208', qty: 10, unit: 'шт', area: 1 },
+  { name: 'Масло индустриальное И-ГМ-40', qty: 60, unit: 'л', area: 1 },
+  { name: 'Масло гидравлическое И-Г-46', qty: 45, unit: 'л', area: 2 },
+  { name: 'Кабель ПВС 3×1.5', qty: 120, unit: 'м', area: 3 },
+  { name: 'Кабель ВВГ 3×2.5', qty: 200, unit: 'м', area: 3 },
+  { name: 'Провод ПВ-3 2,5', qty: 150, unit: 'м', area: 3 },
+  { name: 'Пневмоцилиндр SC32×100', qty: 6, unit: 'шт', area: 2 },
+  { name: 'Клапан пневматический 5/2', qty: 8, unit: 'шт', area: 2 },
+  { name: 'Шланг гидравлический DN16', qty: 30, unit: 'м', area: 2 },
+  { name: 'Ремень клиновой B-2000', qty: 12, unit: 'шт', area: 0 },
+  { name: 'Цепь приводная 24B-1', qty: 6, unit: 'м', area: 0 },
+  { name: 'Ролик конвейерный 108', qty: 40, unit: 'шт', area: 0 },
+  { name: 'Батарея сетевая 4К-9НК', qty: 14, unit: 'шт', area: 3 },
+  { name: 'Пускатель ПМ-12', qty: 10, unit: 'шт', area: 3 },
+  { name: 'Автомат ВА47-29', qty: 25, unit: 'шт', area: 3 },
+  { name: 'Смазка литиевая ЛИТОЛ-24', qty: 35, unit: 'кг', area: 2 },
+  { name: 'Смазка пластичная CI-2', qty: 20, unit: 'кг', area: 1 },
+  { name: 'Фильтр гидравлический Г750', qty: 9, unit: 'шт', area: 2 },
+  { name: 'Фильтр масляный МФ-1', qty: 11, unit: 'шт', area: 2 },
+  { name: 'Уплотнение манжета 35×52×7', qty: 30, unit: 'шт', area: 1 },
+  { name: 'Прокладка паронитовая', qty: 50, unit: 'шт', area: 1 },
+  { name: 'Лента ФУМ', qty: 25, unit: 'рул', area: 2 },
+  { name: 'Изолента ПВХ', qty: 40, unit: 'рул', area: 3 },
+  { name: 'Электрод Р3-3.2', qty: 60, unit: 'кг', area: 2 },
+  { name: 'Проволока Св-08Г2С', qty: 25, unit: 'кг', area: 2 },
+  { name: 'Шпаклёвка реактивная', qty: 15, unit: 'кг', area: 2 },
+  { name: 'Болт М12×40', qty: 300, unit: 'шт', area: 0 },
+  { name: 'Гайка М12', qty: 300, unit: 'шт', area: 0 },
+  { name: 'Шайба Гровера М12', qty: 300, unit: 'шт', area: 0 },
+  { name: 'Крепёж анкерный М16', qty: 80, unit: 'шт', area: 2 },
+  { name: 'Датчик температуры ТС-104', qty: 7, unit: 'шт', area: 3 },
+  { name: 'Датчик давления ДМ-05', qty: 6, unit: 'шт', area: 3 },
+  { name: 'Прокладка пробковая', qty: 45, unit: 'шт', area: 1 },
+  { name: 'Насосная группа НГ-32', qty: 3, unit: 'шт', area: 1 },
+  { name: 'Муфта зубчатая М-3', qty: 8, unit: 'шт', area: 0 },
+  { name: 'Мотор-редуктор 1:23', qty: 4, unit: 'шт', area: 0 },
+  { name: 'Фитинги латунные 1/2″', qty: 50, unit: 'шт', area: 2 },
+  { name: 'Термоусадка 3×1', qty: 20, unit: 'м', area: 3 },
+]
+
 function seed(): DemoStore {
-  const areas: Area[] = [
-    { id: uid(), name: 'Участок №1' },
-    { id: uid(), name: 'Участок №2' },
-  ]
-  const equipment: Equipment[] = [
-    { id: uid(), areaId: areas[0].id, name: 'Станок ЧПУ-1' },
-    { id: uid(), areaId: areas[0].id, name: 'Пресс гидравлический' },
-    { id: uid(), areaId: areas[1].id, name: 'Компрессор ВП-2' },
-    { id: uid(), areaId: areas[1].id, name: 'Конвейер ленточный' },
-  ]
-  const workers: Worker[] = [
-    { id: uid(), userId: 'demo-worker-1', fullName: 'Типо Исполнитель', specialty: 'Слесарь', rank: '4 разряд', brigade: 'Бригада №1', areaId: areas[0].id, status: 'free', rating: 4.6 },
-    { id: uid(), userId: 'demo-worker-2', fullName: 'Иванов И.И.', specialty: 'Электрик', rank: '5 разряд', brigade: 'Бригада №2', areaId: areas[0].id, status: 'busy', rating: 4.2 },
-    { id: uid(), userId: 'demo-worker-3', fullName: 'Петров П.П.', specialty: 'Механик', rank: '3 разряд', brigade: 'Бригада №2', areaId: areas[1].id, status: 'not_on_shift', rating: 3.9 },
-  ]
-  // Справочник материалов (ТЗ §2.2): название, количество, участок.
-  const materials: Material[] = [
-    { id: uid(), name: 'Подшипник 6205', qty: 24, unit: 'шт', areaId: areas[0].id },
-    { id: uid(), name: 'Масло индустриальное И-ГМ-40', qty: 60, unit: 'л', areaId: areas[1].id },
-    { id: uid(), name: 'Кабель ПВС 3×1.5', qty: 120, unit: 'м', areaId: areas[0].id },
-    { id: uid(), name: 'Пневмоцилиндр SC32×100', qty: 3, unit: 'шт', areaId: areas[1].id },
-  ]
+  const areas: Area[] = AREA_NAMES.map((name) => ({ id: uid(), name }))
+  const equipment: Equipment[] = EQUIPMENT_SEED.map((e) => ({
+    id: uid(),
+    areaId: areas[e.area].id,
+    name: e.name,
+    inventoryNo: e.inventoryNo,
+    equipmentType: e.equipmentType,
+    criticality: e.criticality,
+  }))
+  const workers: Worker[] = WORKER_SEED.map((w) => ({
+    id: uid(),
+    userId: w.userId,
+    fullName: w.fullName,
+    specialty: w.specialty,
+    rank: w.rank,
+    brigade: w.brigade,
+    areaId: areas[w.area].id,
+    status: w.status,
+    rating: w.rating,
+  }))
+  const materials: Material[] = MATERIAL_SEED.map((m) => ({
+    id: uid(), name: m.name, qty: m.qty, unit: m.unit, areaId: areas[m.area].id,
+  }))
   return {
     profile: null, workers, areas, equipment, materials, faultCodes: [...FAULT_CODES],
     orders: [], history: [], acceptance: [], notifications: [], counter: 0,
+  }
+}
+
+/**
+ * Доведение демо-хранилища до минимального тестового набора PDF §8
+ * (4 участка, 25 оборудования, 15 исполнителей, 40 материалов, 20 шифров).
+ * Существующие записи не пересоздаются: старые участки «Участок №N»
+ * переименываются в названия из §8, недостающее — добавляется.
+ */
+function migrateBasics(s: DemoStore): void {
+  // 1. Участки: переименование старых + добавление до 4.
+  s.areas.forEach((a, i) => {
+    if (a.name === 'Участок №1') a.name = AREA_NAMES[0]
+    else if (a.name === 'Участок №2') a.name = AREA_NAMES[1]
+    else if (a.name.startsWith('Участок №') && i < AREA_NAMES.length) a.name = AREA_NAMES[i]
+  })
+  for (let i = s.areas.length; i < AREA_NAMES.length; i++) {
+    s.areas.push({ id: uid(), name: AREA_NAMES[i] })
+  }
+  // 2. Оборудование: добавить до 25 (атрибуты §8 заполняются для новых).
+  for (let i = s.equipment.length; i < EQUIPMENT_SEED.length; i++) {
+    const e = EQUIPMENT_SEED[i]
+    s.equipment.push({
+      id: uid(), areaId: s.areas[e.area]?.id ?? s.areas[0].id, name: e.name,
+      inventoryNo: e.inventoryNo, equipmentType: e.equipmentType, criticality: e.criticality,
+    })
+  }
+  // 3. Исполнители: добавить до 15 в 3 бригады.
+  for (let i = s.workers.length; i < WORKER_SEED.length; i++) {
+    const w = WORKER_SEED[i]
+    s.workers.push({
+      id: uid(), userId: w.userId, fullName: w.fullName, specialty: w.specialty,
+      rank: w.rank, brigade: w.brigade, areaId: s.areas[w.area]?.id ?? null,
+      status: w.status, rating: w.rating,
+    })
+  }
+  // 4. Материалы: добавить до 40 позиций.
+  for (let i = s.materials.length; i < MATERIAL_SEED.length; i++) {
+    const m = MATERIAL_SEED[i]
+    s.materials.push({
+      id: uid(), name: m.name, qty: m.qty, unit: m.unit,
+      areaId: s.areas[m.area]?.id ?? null,
+    })
+  }
+  // 5. Шифры неисправностей: добавить недостающие по коду (до 20).
+  const known = new Set(s.faultCodes.map((f) => f.code))
+  for (const f of FAULT_CODES) {
+    if (!known.has(f.code)) s.faultCodes.push({ ...f })
   }
 }
 
@@ -80,6 +257,11 @@ const FAULT_CODES: FaultCode[] = [
   { code: 'П-02', name: 'Пневматика: клапан/цилиндр', description: 'Замена пневмоэлементов', normHours: 4, materialNorm: 'Клапан, цилиндр, уплотнения', workType: 'unplanned', complexity: 3, materialNormQty: 3 },
   { code: 'С-01', name: 'Смазка: недостаток смазки', description: 'Восстановление подачи смазки', normHours: 1, materialNorm: 'Смазка, шприц', workType: 'planned', complexity: 1, materialNormQty: 2 },
   { code: 'С-02', name: 'Смазка: загрязнение масла', description: 'Замена масла, промывка', normHours: 2, materialNorm: 'Масло, фильтр, промывка', workType: 'planned', complexity: 2, materialNormQty: 3 },
+  { code: 'М-05', name: 'Механика: биение вала', description: 'Центровка, замена муфт, динамическая балансировка', normHours: 5, materialNorm: 'Муфты, крепёж', workType: 'unplanned', complexity: 4, materialNormQty: 3 },
+  { code: 'Э-05', name: 'Электрика: пускатель/контактор', description: 'Замена пускателя, зачистка контактов', normHours: 2, materialNorm: 'Пускатель, провод', workType: 'unplanned', complexity: 2, materialNormQty: 2 },
+  { code: 'Г-04', name: 'Гидравлика: утечка масла из бака', description: 'Замена уплотнений, промывка контура', normHours: 4, materialNorm: 'Уплотнения, масло', workType: 'unplanned', complexity: 3, materialNormQty: 4 },
+  { code: 'П-03', name: 'Пневматика: износ клапана ресивера', description: 'Замена клапанной группы', normHours: 3, materialNorm: 'Клапан, прокладки', workType: 'unplanned', complexity: 3, materialNormQty: 2 },
+  { code: 'С-03', name: 'Смазка: засорение системы ЦС', description: 'Промывка магистрали, замена фильтров', normHours: 2, materialNorm: 'Смазка, фильтры', workType: 'planned', complexity: 2, materialNormQty: 3 },
 ]
 
 export function demoListFaultCodes(): FaultCode[] {
@@ -129,16 +311,21 @@ function load(): DemoStore {
         materialNormQty: f.materialNormQty ?? FAULT_CODES.find((d) => d.code === f.code)?.materialNormQty ?? null,
       }))
       store = parsed
+      migrateBasics(store)
       seedAnalytics(store)
       seedHistory(store)
+      seedBulk(store)
+      save()
       return store
     }
   } catch {
     // повреждённое хранилище — пересеем
   }
   store = seed()
+  migrateBasics(store)
   seedAnalytics(store)
   seedHistory(store)
+  seedBulk(store)
   save()
   return store
 }
@@ -358,6 +545,234 @@ function seedHistory(s: DemoStore): void {
   for (const o of s.orders) seedOrderHistory(s, o)
 }
 
+/**
+ * Досыпка до 500+ нарядов за 3 месяца (PDF §8) с заложенными
+ * закономерностями (§8 «3–4 закономерности» для показа ИИ на защите):
+ *   • конвейер («проблемный узел») ломается ~3 раза чаще остальных;
+ *   • один исполнитель часто получает повторные отказы;
+ *   • поломка вскоре после планового ремонта (ППР) — сигнал качества ППR;
+ *   • списания ТМЦ в 3 раза выше норматива — аномальный расход.
+ * Плюс недавние активные наряды всех статусов (доска, счётчики,
+ * эскалации §6.1). Детерминировано, выполняется один раз.
+ */
+function seedBulk(s: DemoStore): void {
+  if (s.bulkSeeded || s.orders.length >= 500) {
+    s.bulkSeeded = true
+    return
+  }
+  const workers = s.workers
+  const equipment = s.equipment
+  if (workers.length === 0 || equipment.length === 0) return
+
+  const DAY = 86_400_000
+  const at = (daysAgo: number, hour: number): Date => {
+    const d = new Date(Date.now() - daysAgo * DAY)
+    d.setHours(hour, 0, 0, 0)
+    return d
+  }
+  const fault = (code: string): FaultCode =>
+    s.faultCodes.find((f) => f.code === code) ?? {
+      code, name: code, description: '', normHours: null, materialNorm: null, workType: 'unplanned',
+    }
+  const areaOf = (equipmentId: string) => equipment.find((e) => e.id === equipmentId)?.areaId ?? ''
+  const used = new Set(s.orders.map((o) => o.number))
+  let numSeq = 1
+  const nextNumber = (): string => {
+    let num = ''
+    do {
+      num = `Н-АН-${String(numSeq).padStart(4, '0')}`
+      numSeq += 1
+    } while (used.has(num))
+    used.add(num)
+    return num
+  }
+
+  interface BulkOrder {
+    eq: string
+    worker: string | null
+    type: WorkOrder['workType']
+    code: string
+    daysAgo: number
+    reactH: number | null
+    workH: number | null
+    status: WorkOrder['status']
+    deadlineDays: number
+    closeDays?: number
+    priority?: Priority
+    materials?: MaterialItem[]
+    rejectReason?: string | null
+  }
+
+  const push = (o: BulkOrder): void => {
+    const f = fault(o.code)
+    const createdAt = at(o.daysAgo, 8)
+    const deadline = at(o.daysAgo - o.deadlineDays, 18)
+    const acceptedAt = o.reactH == null ? null : new Date(createdAt.getTime() + o.reactH * 3_600_000)
+    const startedAt = acceptedAt
+    const completedAt = o.workH != null && startedAt ? new Date(startedAt.getTime() + o.workH * 3_600_000) : null
+    const closedAt =
+      completedAt && o.status === 'closed'
+        ? new Date(completedAt.getTime() + (o.closeDays ?? 0) * DAY)
+        : null
+    const order: WorkOrder = {
+      id: uid(),
+      number: nextNumber(),
+      workType: o.type,
+      description: `${f.name}. ${f.description}`,
+      areaId: areaOf(o.eq),
+      equipmentId: o.eq,
+      workerId: o.worker,
+      deadline: deadline.toISOString(),
+      priority: o.priority ?? (o.type === 'planned' ? 'planned' : 'normal'),
+      status: o.status,
+      faultCode: f.code,
+      photos: [],
+      comment: null,
+      normHours: f.normHours,
+      workDone: completedAt ? `Выполнено: ${f.name.toLowerCase()}` : null,
+      workerComment: null,
+      materials: o.materials?.map((m) => `${m.name} × ${m.qty} ${m.unit}`).join('; ') ?? null,
+      materialsList: o.materials ?? [],
+      photosAfter: [],
+      pauseReason: o.status === 'suspended' ? 'Ждёт запчасти' : null,
+      rejectReason: o.rejectReason ?? null,
+      pausedAt: null,
+      createdBy: 'demo-master',
+      createdAt: createdAt.toISOString(),
+      acceptedAt: acceptedAt?.toISOString() ?? null,
+      startedAt: startedAt?.toISOString() ?? null,
+      completedAt: completedAt?.toISOString() ?? null,
+      closedAt: closedAt?.toISOString() ?? null,
+    }
+    s.orders.push(order)
+    seedOrderHistory(s, order)
+    if (['closed', 'completed', 'rework'].includes(order.status)) {
+      s.acceptance.push({
+        id: uid(),
+        orderId: order.id,
+        aiScore: 3 + ((s.orders.length * 5) % 3),
+        aiComment: 'Демо-оценка ИИ.',
+        masterDecision: order.status === 'rework' ? 'rework' : 'accepted',
+        agreedWithAi: true,
+        masterComment: null,
+        checklist: null,
+        createdAt: (closedAt ?? completedAt ?? createdAt).toISOString(),
+      })
+    }
+  }
+
+  const codes = s.faultCodes.map((f) => f.code)
+  const UNPL = codes.filter((c) => (fault(c).workType ?? 'unplanned') !== 'planned')
+  const PLN = codes.filter((c) => fault(c).workType === 'planned')
+  const unpl = UNPL.length ? UNPL : codes
+  const pln = PLN.length ? PLN : codes
+  const conveyor = equipment.find((e) => /Конвейер/i.test(e.name)) ?? equipment[0]
+  const others = equipment.filter((e) => e.id !== conveyor.id)
+  const rejecter = (workers[5] ?? workers[0]).id
+
+  // --- Недавние активные наряды всех статусов (без in_work — правило §6) ---
+  // [status, daysAgo, deadlineDays]; deadlineDays < daysAgo → просрочен.
+  const actives: Array<[WorkOrder['status'], number, number]> = [
+    ['issued', 2, 1], ['issued', 3, 1], ['issued', 1, 3], ['issued', 4, 3], ['issued', 1, 2], ['issued', 5, 4],
+    ['accepted', 3, 2], ['accepted', 2, 1], ['accepted', 1, 4],
+    ['queued', 2, 3], ['queued', 4, 5], ['queued', 3, 4], ['queued', 5, 6],
+    ['suspended', 3, 4], ['suspended', 5, 6],
+    ['completed', 2, 3], ['completed', 3, 4], ['completed', 4, 6],
+    ['rework', 3, 2], ['rework', 4, 5], ['rework', 5, 7],
+  ]
+  actives.forEach(([status, daysAgo, deadlineDays], idx) => {
+    const worker = workers[idx % workers.length]
+    const isPlanned = idx % 3 === 0
+    push({
+      eq: equipment[(idx * 7) % equipment.length].id,
+      worker: worker.id,
+      type: isPlanned ? 'planned' : 'unplanned',
+      code: isPlanned ? pln[idx % pln.length] : unpl[idx % unpl.length],
+      daysAgo,
+      reactH: status === 'issued' ? null : 1 + (idx % 3),
+      workH: ['completed', 'rework'].includes(status) ? 2 + (idx % 4) : null,
+      status,
+      deadlineDays,
+    })
+  })
+
+  // --- Основная масса: 500+ нарядов за ~3 месяца ---
+  const total = 520 - s.orders.length
+  const rejectReasons: Array<string | null> = [
+    'Нет материалов', 'Нет допуска', 'Занят аварийным обслуживанием', null,
+  ]
+  let pendingPpr: { eq: string; daysAgo: number } | null = null
+  for (let i = 0; i < total; i++) {
+    const daysAgo = 3 + Math.floor((i * 85) / Math.max(1, total)) // 3..87 дней (3 месяца)
+    // 1) Плановый ремонт…
+    if (i % 14 === 0 && total - i > 2) {
+      const eq = equipment[(i * 5) % equipment.length]
+      push({
+        eq: eq.id, worker: workers[(i * 3) % workers.length].id, type: 'planned',
+        code: pln[i % pln.length], daysAgo, reactH: 1, workH: 2, status: 'closed', deadlineDays: 3,
+      })
+      pendingPpr = { eq: eq.id, daysAgo }
+      continue
+    }
+    // 2) …затем внеплановая поломка того же узла вскоре после ППR.
+    if (pendingPpr) {
+      const p = pendingPpr
+      pendingPpr = null
+      push({
+        eq: p.eq, worker: workers[i % workers.length].id, type: 'unplanned',
+        code: unpl[i % unpl.length], daysAgo: Math.max(1, p.daysAgo - 2),
+        reactH: 2, workH: 3, status: 'closed', deadlineDays: 1,
+      })
+      continue
+    }
+    // 3) Повторные отказы одного исполнителя (компонент рейтинга §6.6).
+    if (i % 11 === 5) {
+      const eq = others[i % others.length] ?? conveyor
+      push({
+        eq: eq.id, worker: rejecter, type: 'unplanned', code: unpl[i % unpl.length],
+        daysAgo, reactH: null, workH: null, status: 'rejected', deadlineDays: 1,
+        rejectReason: rejectReasons[i % rejectReasons.length],
+      })
+      continue
+    }
+    // 4) Основная масса: конвейер — проблемный узел (~3× чаще остальных):
+    //    у него 1/9 внеплановых, у каждого остального — 7/9/24 ≈ 1/27.
+    const isUnplanned = i % 3 !== 0
+    const eq = isUnplanned
+      ? (i % 9 === 0 ? conveyor : others[(i * 7) % others.length] ?? conveyor)
+      : equipment[(i * 11) % equipment.length]
+    const code = isUnplanned ? unpl[i % unpl.length] : pln[i % pln.length]
+    const priority: Priority | undefined = isUnplanned
+      ? (['normal', 'normal', 'high', 'emergency', 'normal', 'high'] as Priority[])[i % 6]
+      : 'planned'
+    // 5) Аномальный расход: в 3 раза выше материального норматива (§6.5).
+    const f = fault(code)
+    const materials = isUnplanned && i % 13 === 4 && f.materialNormQty
+      ? [{
+          name: (f.materialNorm ?? 'Материалы').split(',')[0].trim(),
+          qty: f.materialNormQty * 3,
+          unit: 'шт',
+        }]
+      : undefined
+    push({
+      eq: eq.id,
+      worker: workers[(i * 7) % workers.length].id,
+      type: isUnplanned ? 'unplanned' : 'planned',
+      code,
+      daysAgo,
+      reactH: isUnplanned ? 1 + (i % 5) : 1,
+      workH: 2 + (i % 6),
+      status: 'closed',
+      deadlineDays: isUnplanned ? 1 : 3,
+      closeDays: i % 5 === 0 ? 1 : 0,
+      priority,
+      materials,
+    })
+  }
+  s.bulkSeeded = true
+  save()
+}
+
 export function demoGetProfile(): Profile | null {
   return load().profile
 }
@@ -448,9 +863,20 @@ export function demoListEquipment(): Equipment[] {
 }
 
 /** Добавление оборудования: Название + Участок (ТЗ §2.3). */
-export function demoCreateEquipment(name: string, areaId: string): void {
+export function demoCreateEquipment(
+  name: string,
+  areaId: string,
+  attrs?: Pick<Equipment, 'inventoryNo' | 'equipmentType' | 'criticality'>,
+): void {
   const s = load()
-  s.equipment.push({ id: uid(), name, areaId })
+  s.equipment.push({
+    id: uid(),
+    name,
+    areaId,
+    inventoryNo: attrs?.inventoryNo ?? null,
+    equipmentType: attrs?.equipmentType ?? null,
+    criticality: attrs?.criticality ?? null,
+  })
   save()
 }
 

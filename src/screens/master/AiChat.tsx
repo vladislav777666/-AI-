@@ -10,6 +10,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { assistantAnswerLLM } from '../../lib/ai'
+import { createAnonymizer, type Anonymizer } from '../../lib/anonymize'
 import { LLM_MODEL, llmConfigured } from '../../lib/llm'
 import { speechToTextSupported, startSpeechToText } from '../../lib/photos'
 import {
@@ -46,7 +47,9 @@ export default function AiChat({ data }: { data: MasterData }) {
   const nextId = useRef(1)
   const bottomRef = useRef<HTMLDivElement | null>(null)
 
-  const context = useMemo(() => buildContext(data), [data])
+  // PDF §9: внешней модели передаём только обезличенный снимок (ФИО → псевдонимы).
+  const anon = useMemo(() => createAnonymizer(data.workers), [data.workers])
+  const context = useMemo(() => buildContext(data, anon), [data, anon])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' })
@@ -62,7 +65,8 @@ export default function AiChat({ data }: { data: MasterData }) {
     setBusy(true)
     try {
       const answer = await assistantAnswerLLM(q, context)
-      setMessages((m) => [...m, { id: nextId.current++, role: 'ai', text: answer, source: 'nim' }])
+      // Восстанавливаем ФИО в ответе модели — они не отправлялись (PDF §9).
+      setMessages((m) => [...m, { id: nextId.current++, role: 'ai', text: anon.restore(answer), source: 'nim' }])
     } catch (err) {
       // Ключа нет или модель недоступна — отвечают локальные правила; причину
       // показываем в пометке ответа, а не техническим баннером.
@@ -182,7 +186,7 @@ export default function AiChat({ data }: { data: MasterData }) {
 // ---------- Снимок данных для модели ----------
 
 /** Компактный текстовый снимок состояния: его получает модель и правила. */
-export function buildContext(data: MasterData): string {
+export function buildContext(data: MasterData, anon: Anonymizer): string {
   const now = new Date()
   const open = data.orders.filter((o) => !['closed', 'cancelled'].includes(o.status))
   const overdue = data.orders.filter((o) => isOverdue(o))
@@ -193,7 +197,7 @@ export function buildContext(data: MasterData): string {
   const workers = data.workers.map((w) => {
     const mine = data.orders.filter((o) => o.workerId === w.id)
     const activeCount = mine.filter((o) => ['issued', 'accepted', 'in_work', 'queued', 'suspended', 'rework'].includes(o.status)).length
-    return `${w.fullName} — ${w.specialty}${w.rank ? `, ${w.rank}` : ''}` +
+    return `${anon.alias(w.id)} — ${w.specialty}${w.rank ? `, ${w.rank}` : ''}` +
       `${w.brigade ? `, ${w.brigade}` : ''}; статус: ${WORKER_STATUS_LABELS[w.status]}` +
       `; рейтинг: ${w.rating}; открытых нарядов: ${activeCount}` +
       `${w.areaId ? `; участок: ${areaName(data, w.areaId)}` : ''}`
@@ -202,7 +206,7 @@ export function buildContext(data: MasterData): string {
   const orderLine = (o: WorkOrder) =>
     `${o.number} — ${o.status}; ${o.workType === 'planned' ? 'плановый' : 'внеплановый'}; ` +
     `оборудование: ${equipmentName(data, o.equipmentId)}; участок: ${areaName(data, o.areaId)}; ` +
-    `исполнитель: ${workerName(data, o.workerId)}; срок: ${new Date(o.deadline).toLocaleString('ru-RU')}` +
+    `исполнитель: ${anon.alias(o.workerId)}; срок: ${new Date(o.deadline).toLocaleString('ru-RU')}` +
     `${o.faultCode ? `; шифр: ${o.faultCode}` : ''}`
 
   const byEquipment = new Map<string, number>()

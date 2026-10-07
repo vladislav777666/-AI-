@@ -128,7 +128,7 @@ export default function CloseForm({ ctx, orderId }: { ctx: WorkerCtx; orderId: s
         status: 'completed',
         notify: {
           type: 'ACCEPTANCE',
-          title: `Наряд ${order!.number} на приёмке`,
+          title: `Наряд ${order!.number}: проверка ИИ`,
           message: 'Исполнитель отправил работы на приёмку.',
         },
       })

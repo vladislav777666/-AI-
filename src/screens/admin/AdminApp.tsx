@@ -28,18 +28,22 @@ export default function AdminApp({ profile }: { profile: Profile }) {
   const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
-    try {
-      const [w, a, e, o] = await Promise.all([
-        db.listWorkers(), db.listAreas(), db.listEquipment(), db.listOrders(),
-      ])
-      setWorkers(w)
-      setAreas(a)
-      setEquipment(e)
-      setOrders(o)
-      setError(null)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка загрузки данных')
-    }
+    // Офлайн-просмотр: каждый источник читается независимо (кэш readThrough),
+    // поэтому один сбой не обрушивает весь экран — показываем всё, что есть.
+    const res = await Promise.allSettled([
+      db.listWorkers(), db.listAreas(), db.listEquipment(), db.listOrders(),
+    ])
+    const [w, a, e, o] = res
+    if (w.status === 'fulfilled') setWorkers(w.value)
+    if (a.status === 'fulfilled') setAreas(a.value)
+    if (e.status === 'fulfilled') setEquipment(e.value)
+    if (o.status === 'fulfilled') setOrders(o.value)
+    const failed = res.find((r): r is PromiseRejectedResult => r.status === 'rejected')
+    setError(
+      !failed ? null
+        : failed.reason instanceof Error ? failed.reason.message
+          : 'Ошибка загрузки данных',
+    )
   }, [])
 
   useEffect(() => {
@@ -75,6 +79,9 @@ export default function AdminApp({ profile }: { profile: Profile }) {
     window.addEventListener('db-synced', onSynced)
     return () => window.removeEventListener('db-synced', onSynced)
   }, [refresh])
+
+  // Реалтайм-обновления (PDF §9 п.3: ≤5 секунд).
+  useEffect(() => db.subscribeRealtime(() => { void refresh() }), [refresh])
 
   const data: AdminData = { profile, workers, areas, equipment, orders, refresh, go, back }
 

@@ -18,6 +18,9 @@ import ClosedOrders from './Closed'
 import Notifs from './Notifs'
 import type { WorkerCtx, WorkerView } from './shared'
 
+/** Порог напоминания исполнителю о приближении срока (PDF §6.1 п.2): 30 минут. */
+const REMINDER_BEFORE_MS = 30 * 60_000
+
 export default function WorkerApp({ profile }: { profile: Profile }) {
   const [view, setView] = useState<WorkerView>({ view: 'home' })
   // Стек переходов для кнопки «← Назад» (веб-версия: системной кнопки возврата нет).
@@ -39,23 +42,30 @@ export default function WorkerApp({ profile }: { profile: Profile }) {
   }, [])
 
   const refresh = useCallback(async () => {
-    try {
-      const [w, a, e, o, f] = await Promise.all([
-        db.listWorkers(), db.listAreas(), db.listEquipment(), db.listOrders(), db.listFaultCodes(),
-      ])
-      const worker = w.find((x) => x.userId === profile.id) ?? null
+    // Офлайн-просмотр нарядов: каждый источник читается независимо (кэш
+    // readThrough), один сбой не обрушивает весь кабинет — показываем всё, что есть.
+    const res = await Promise.allSettled([
+      db.listWorkers(), db.listAreas(), db.listEquipment(), db.listOrders(), db.listFaultCodes(),
+    ])
+    const [w, a, e, o, f] = res
+    if (a.status === 'fulfilled') setAreas(a.value)
+    if (e.status === 'fulfilled') setEquipment(e.value)
+    if (f.status === 'fulfilled') setFaultCodes(f.value)
+    if (w.status === 'fulfilled') {
+      const worker = w.value.find((x) => x.userId === profile.id) ?? null
       setMe(worker)
       // RLS уже фильтрует на сервере; в демо — фильтруем сами.
-      setOrders(worker ? o.filter((x) => x.workerId === worker.id) : [])
-      setAreas(a)
-      setEquipment(e)
-      setFaultCodes(f)
-      setError(null)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось загрузить наряды. Повторить.')
-    } finally {
-      setLoading(false)
+      if (o.status === 'fulfilled') {
+        setOrders(worker ? o.value.filter((x) => x.workerId === worker.id) : [])
+      }
     }
+    const failed = res.find((r): r is PromiseRejectedResult => r.status === 'rejected')
+    setError(
+      !failed ? null
+        : failed.reason instanceof Error ? failed.reason.message
+          : 'Не удалось загрузить наряды. Повторить.',
+    )
+    setLoading(false)
   }, [profile.id])
 
   const refreshNotifs = useCallback(async () => {
@@ -92,6 +102,7 @@ export default function WorkerApp({ profile }: { profile: Profile }) {
   }, [submit, refresh])
 
   // Системные уведомления: просрочка и приближение срока (ТЗ §32.3, §33).
+  // Напоминание — за 30 минут до срока (PDF §6.1 п.2; порог настраивается).
   const ensureSystemNotifs = useCallback(async () => {
     const now = Date.now()
     const seen = new Set(notifications.map((n) => `${n.type}:${n.workOrderId}`))
@@ -106,7 +117,7 @@ export default function WorkerApp({ profile }: { profile: Profile }) {
           title: `Наряд ${o.number} просрочен`,
           message: `Статус: ${ORDER_STATUS_LABELS[o.status]}. Приоритет: ${PRIORITY_SHORT[o.priority]}. Просрочен на ${formatDuration(now - dl)}.`,
         }).catch(() => {})
-      } else if (dl - now < 2 * 3600 * 1000 && ['issued', 'accepted', 'queued', 'in_work', 'rework'].includes(o.status)) {
+      } else if (dl - now < REMINDER_BEFORE_MS && ['issued', 'accepted', 'queued', 'in_work', 'rework'].includes(o.status)) {
         await db.createNotification({
           userId: profile.id, workOrderId: o.id, type: 'DEADLINE_APPROACH',
           title: `Срок по наряду ${o.number} скоро`,
@@ -127,6 +138,12 @@ export default function WorkerApp({ profile }: { profile: Profile }) {
     window.addEventListener('db-synced', onSynced)
     return () => window.removeEventListener('db-synced', onSynced)
   }, [refresh, refreshNotifs])
+
+  // Реалтайм-обновления (PDF §9 п.3: ≤5 секунд): чужие изменения + соседняя вкладка.
+  useEffect(
+    () => db.subscribeRealtime(() => { void refresh(); void refreshNotifs() }),
+    [refresh, refreshNotifs],
+  )
 
   useEffect(() => {
     if (!loading && orders.length >= 0) void ensureSystemNotifs()

@@ -3,7 +3,7 @@
 
 import { useState, type FormEvent } from 'react'
 import { Capacitor } from '@capacitor/core'
-import { demoSignInAs, isDemoMode, signIn, signUp } from '../lib/auth'
+import { DEMO_PINS, demoSignInAs, isDemoMode, signIn, signInPin, signUp } from '../lib/auth'
 import type { Role } from '../lib/types'
 
 export default function Login({ error }: { error: string | null }) {
@@ -13,6 +13,29 @@ export default function Login({ error }: { error: string | null }) {
   const [fullName, setFullName] = useState('')
   const [busy, setBusy] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
+  const [pin, setPin] = useState('')
+  const [pinBusy, setPinBusy] = useState(false)
+  const [pinError, setPinError] = useState<string | null>(null)
+
+  // Вход по ПИН-коду (PDF §9 п.5): демо-режим, тестовые ПИНы §12.
+  async function submitPin(e: FormEvent) {
+    e.preventDefault()
+    if (pinBusy) return
+    setPinBusy(true)
+    setPinError(null)
+    try {
+      const role = await signInPin(pin)
+      if (!role) {
+        setPinError('Неверный ПИН-код.')
+      } else if (Capacitor.isNativePlatform() && role !== 'Master' && role !== 'Worker') {
+        setPinError('Эта роль доступна только в веб-панели.')
+      }
+    } catch (err) {
+      setPinError(err instanceof Error ? err.message : 'Ошибка входа')
+    } finally {
+      setPinBusy(false)
+    }
+  }
 
   const shownError = localError ?? error
 
@@ -73,6 +96,36 @@ export default function Login({ error }: { error: string | null }) {
                 {label}
               </button>
             ))}
+
+            {/* Вход по ПИН-коду (PDF §9 п.5). */}
+            <form onSubmit={submitPin} noValidate className="mt-2 flex gap-2">
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={4}
+                placeholder="ПИН-код (4 цифры)"
+                aria-label="ПИН-код"
+                value={pin}
+                onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))}
+                className="w-full border border-neutral-300 px-4 py-3 text-center tracking-[0.3em] focus:border-neutral-900 focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={pinBusy || pin.length !== 4}
+                className="border border-neutral-900 px-5 text-sm font-medium transition-colors hover:bg-neutral-900 hover:text-white disabled:opacity-40"
+              >
+                {pinBusy ? '…' : 'Войти по ПИН'}
+              </button>
+            </form>
+            {pinError && (
+              <p role="alert" className="border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
+                {pinError}
+              </p>
+            )}
+            <p className="text-xs text-neutral-500">
+              Тестовые ПИН: {DEMO_PINS.Master} — Мастер, {DEMO_PINS.Worker} — Исполнитель,{' '}
+              {DEMO_PINS.Head} — Руководитель, {DEMO_PINS.Admin} — Администратор.
+            </p>
           </div>
         ) : (
           <form onSubmit={submit} noValidate className="flex w-full max-w-sm flex-col gap-4">
