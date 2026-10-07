@@ -152,18 +152,21 @@ export interface NavItem {
   icon: string
 }
 
-/** Нижняя панель навигации для телефона (скрывается на десктопе). */
+/** Нижняя панель навигации для телефона (скрывается на десктопе).
+ *  Пять пунктов — ровная сетка; больше пяти — горизонтальная прокрутка,
+ *  чтобы подписи оставались читаемыми на узком экране. */
 export function BottomNav({ items, activeKey, onSelect }: {
   items: NavItem[]
   activeKey: string
   onSelect: (key: string) => void
 }) {
+  const scrollable = items.length > 5
   return (
     <nav
       className="fixed inset-x-0 bottom-0 z-20 border-t border-neutral-200 bg-white/95 backdrop-blur md:hidden"
       style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
     >
-      <div className="grid grid-cols-5">
+      <div className={scrollable ? 'flex overflow-x-auto' : 'grid grid-cols-5'}>
         {items.map((it) => {
           const active = it.key === activeKey
           return (
@@ -172,9 +175,9 @@ export function BottomNav({ items, activeKey, onSelect }: {
               type="button"
               aria-current={active ? 'page' : undefined}
               onClick={() => onSelect(it.key)}
-              className={`flex min-h-14 flex-col items-center justify-center gap-0.5 px-1 py-2 text-[11px] leading-tight transition-colors ${
-                active ? 'font-semibold text-neutral-900' : 'text-neutral-500'
-              }`}
+              className={`flex min-h-14 flex-col items-center justify-center gap-0.5 py-2 text-[11px] leading-tight transition-colors ${
+                scrollable ? 'min-w-[76px] flex-1 shrink-0 px-2' : 'px-1'
+              } ${active ? 'font-semibold text-neutral-900' : 'text-neutral-500'}`}
             >
               <span className="text-lg leading-none" aria-hidden>{it.icon}</span>
               <span className="max-w-full truncate">{it.label}</span>

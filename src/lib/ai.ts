@@ -3,7 +3,7 @@
 // ответы даёт реальная модель (см. llm.ts); без ключа или при ошибке сети
 // работают локальные эвристики ниже — они же мгновенный фоллбэк.
 
-import { LLM_MODEL, llmConfigured, llmJson } from './llm'
+import { LLM_MODEL, llmChat, llmConfigured, llmJson } from './llm'
 import {
   WORKER_STATUS_LABELS,
   type AiVerdict, type ChecklistItem, type FaultCode, type WorkOrder, type Worker,
@@ -459,4 +459,99 @@ export async function aiVerdictLLM(order: WorkOrder, faultCodes: FaultCode[] = [
     `Оценка ИИ (${LLM_MODEL}): ${score}/5. Пройдено критериев: ${passedCount}/5. ` +
     (summary || (failed.length ? `Требует внимания: ${failed.join(', ')}.` : 'Замечаний не найдено.'))
   return { score, comment, checklist }
+}
+
+// ---------- ИИ-сводка аномалий (Веб-панель руководителя, Раздел 3) ----------
+
+export interface AnomalySummary {
+  text: string
+  source: 'nim' | 'local'
+}
+
+/** Вид ИИ-сводки: аномалии (панель руководителя), смена и рекомендации
+ *  (отчёты Мастера). */
+export type SummaryKind = 'anomalies' | 'shift' | 'recommendations'
+
+const SUMMARY_SYSTEM: Record<SummaryKind, string> = {
+  anomalies:
+    'Ты — аналитик по надёжности оборудования. По переданным фактам-аномалиям ' +
+    '(плановые работы и внеплановые после них, бригады, участки и оборудование, ' +
+    'перерасход материалов) напиши краткую сводку по-русски: 2–4 предложения, ' +
+    'выдели самые серьёзные проблемы и возможные общие причины. Без markdown и ' +
+    'без списков. Отвечай только JSON вида {"summary":"..."}.',
+  shift:
+    'Ты — старший мастер производства. По переданным фактам за смену (выдано, ' +
+    'выполнено, просрочено, отклонено, загрузка персонала, простои) напиши итоговую ' +
+    'сводку по-русски: 2–4 предложения — что прошло хорошо, что требует внимания ' +
+    'и на что обратить внимание в первую очередь. Без markdown и без списков. ' +
+    'Отвечай только JSON вида {"summary":"..."}.',
+  recommendations:
+    'Ты — инженер по надёжности. По переданным фактам (топ проблемного ' +
+    'оборудования и участков, повторные отказы) дай выводы и конкретные ' +
+    'рекомендации по-русски: 3–5 предложений с приоритетами. Опирайся только на ' +
+    'переданные факты, не выдумывай данные. Без markdown и без списков. ' +
+    'Отвечай только JSON вида {"summary":"..."}.',
+}
+
+/**
+ * Универсальная текстовая сводка от модели: `facts` — готовые строки-факты,
+ * `local` — заранее собранный текстовый фоллбэк (используется, если ключ не
+ * задан, фактов нет или модель недоступна).
+ */
+export async function aiTextSummary(
+  kind: SummaryKind,
+  facts: string[],
+  local: string,
+): Promise<AnomalySummary> {
+  if (!llmConfigured || facts.length === 0) return { text: local, source: 'local' }
+  try {
+    const res = await llmJson<{ summary?: unknown }>({
+      system: SUMMARY_SYSTEM[kind],
+      user: `Факты:\n${facts.map((f) => `- ${f}`).join('\n')}`,
+      maxTokens: kind === 'recommendations' ? 2_000 : 1_500,
+      temperature: 0.3,
+      timeoutMs: 45_000,
+    })
+    const text = typeof res.summary === 'string'
+      ? res.summary.replace(/\s*\n+\s*/g, ' ').trim()
+      : ''
+    if (text) return { text: `ИИ (${LLM_MODEL}): ${text}`, source: 'nim' }
+  } catch {
+    // модель недоступна — отдаём локальную сводку
+  }
+  return { text: local, source: 'local' }
+}
+
+/**
+ * Текстовая сводка аномалий, сгенерированная ИИ (Раздел 3 ТЗ «Веб-панель
+ * руководителя»). Без ключа/сети или при ошибке модели — локальная сводка
+ * из тех же фактов.
+ */
+export async function anomalySummaryLLM(facts: string[]): Promise<AnomalySummary> {
+  const local = facts.length === 0
+    ? 'Аномалий за выбранный период не выявлено: плановые работы не сопровождались ' +
+      'внеплановыми в течение недели, перерасхода ТМЦ нет.'
+    : `Правила анализа выявили аномалии (${facts.length}). ` + facts.slice(0, 6).join(' ')
+  return aiTextSummary('anomalies', facts, local)
+}
+
+/**
+ * Свободный ИИ-ассистент мастера (раздел «ИИ»): отвечает на вопрос в свободной
+ * форме по переданному снимку данных. Бросает исключение, если ключ не задан
+ * или модель недоступна — вызывающий код показывает локальный ответ.
+ */
+export async function assistantAnswerLLM(question: string, context: string): Promise<string> {
+  if (!llmConfigured) throw new Error('ИИ-помощник недоступен: ключ NVIDIA NIM не задан')
+  const text = await llmChat({
+    system:
+      'Ты — ИИ-помощник мастера производственного участка (система «Наряды»). ' +
+      'Отвечай по-русски, кратко и по делу (2–5 предложений или короткий список). ' +
+      'Опирайся ТОЛЬКО на переданный снимок данных; если данных не хватает — скажи, ' +
+      'чего именно не хватает, и не выдумывай значения. Не используй markdown-таблицы.',
+    user: `Снимок данных системы:\n${context}\n\nВопрос мастера: ${question}`,
+    maxTokens: 1_500,
+    temperature: 0.2,
+    timeoutMs: 45_000,
+  })
+  return text.replace(/\s*\n{2,}\s*/g, '\n').trim()
 }

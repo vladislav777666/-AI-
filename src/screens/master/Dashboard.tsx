@@ -22,11 +22,17 @@ export default function Dashboard({ data }: { data: MasterData }) {
     { label: 'Оборудование в простое', value: idleEquipment, filter: 'issued', hint: 'Наряд создан, но ещё не принят в работу' },
   ]
 
-  const menu: Array<{ label: string; screen: 'orders' | 'workers' | 'issue' | 'notifications' }> = [
-    { label: 'Наряды', screen: 'orders' },
-    { label: 'Исполнители', screen: 'workers' },
-    { label: 'Выдать наряд', screen: 'issue' },
-    { label: 'Уведомления', screen: 'notifications' },
+  const menu: Array<{
+    label: string
+    screen: 'orders' | 'workers' | 'issue' | 'notifications' | 'reports' | 'ai'
+    hint: string
+  }> = [
+    { label: 'Наряды', screen: 'orders', hint: 'Список нарядов и фильтры по статусам' },
+    { label: 'Исполнители', screen: 'workers', hint: 'Персонал, досье и занятость' },
+    { label: 'Выдать наряд', screen: 'issue', hint: 'Новый наряд с подсказками ИИ' },
+    { label: 'Отчёты', screen: 'reports', hint: 'Шесть видов отчётов, фильтры, выгрузка PDF/Excel' },
+    { label: 'ИИ', screen: 'ai', hint: 'Чат и голосовой помощник по данным системы' },
+    { label: 'Уведомления', screen: 'notifications', hint: 'События по нарядам' },
   ]
 
   return (
@@ -52,9 +58,10 @@ export default function Dashboard({ data }: { data: MasterData }) {
             key={m.screen}
             type="button"
             onClick={() => go({ screen: m.screen })}
-            className="border border-neutral-900 bg-white px-6 py-5 text-lg font-medium transition-colors hover:bg-neutral-900 hover:text-white"
+            className="border border-neutral-900 bg-white px-6 py-5 text-left transition-colors hover:bg-neutral-900 hover:text-white"
           >
-            {m.label}
+            <span className="text-lg font-medium">{m.label}</span>
+            <span className="mt-1 block text-sm opacity-70">{m.hint}</span>
           </button>
         ))}
       </div>

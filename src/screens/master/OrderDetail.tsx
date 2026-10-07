@@ -2,7 +2,7 @@
 // отмена, приёмка с Вердиктом ИИ (§3.2) и история изменений в формате
 // «что было → что стало».
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { aiVerdict, aiVerdictLLM } from '../../lib/ai'
 import { LLM_MODEL, llmConfigured } from '../../lib/llm'
 import * as db from '../../lib/db'
@@ -29,7 +29,19 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
-export default function OrderDetail({ data, orderId }: { data: OrderCardData; orderId: string }) {
+/** Карточка наряда.
+ *  readOnly — режим просмотра (веб-руководитель): сводка §3.1, приёмка и
+ *  история показываются, но форма редактирования, отмена и сама приёмка
+ *  скрыты — правки наряда остаются за Мастером. */
+export default function OrderDetail({
+  data, orderId, readOnly = false, focusHistory = false,
+}: {
+  data: OrderCardData
+  orderId: string
+  readOnly?: boolean
+  /** Переход из «Уведомлений» (просроченный наряд): прокрутить к истории. */
+  focusHistory?: boolean
+}) {
   const order = useMemo(
     () => data.orders.find((o) => o.id === orderId) ?? null,
     [data.orders, orderId],
@@ -38,7 +50,9 @@ export default function OrderDetail({ data, orderId }: { data: OrderCardData; or
   const [form, setForm] = useState<OrderFormValues | null>(null)
   const [bigFont, setBigFont] = useState(false)
   const [history, setHistory] = useState<HistoryEntry[]>([])
-  const [openEvent, setOpenEvent] = useState<HistoryEntry | null>(null)
+  const [selectedEvent, setSelectedEvent] = useState<HistoryEntry | null>(null)
+  const detailRef = useRef<HTMLElement | null>(null)
+  const historyRef = useRef<HTMLDivElement | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [agreeAi, setAgreeAi] = useState<boolean | null>(null)
@@ -62,6 +76,15 @@ export default function OrderDetail({ data, orderId }: { data: OrderCardData; or
     if (order && !form) setForm(valuesFromOrder(order))
   }, [order, form])
 
+  // Переход из «Уведомлений»: открываем наряд сразу на окне истории.
+  useEffect(() => {
+    if (!focusHistory) return
+    const t = window.setTimeout(() => {
+      historyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 150)
+    return () => window.clearTimeout(t)
+  }, [focusHistory, orderId])
+
   useEffect(() => {
     let alive = true
     void db.getHistory(orderId).then((h) => alive && setHistory(h))
@@ -72,7 +95,7 @@ export default function OrderDetail({ data, orderId }: { data: OrderCardData; or
   // ИИ-вердикт через NVIDIA NIM — по содержимому наряда, не по каждому ререндеру.
   useEffect(() => {
     let alive = true
-    if (!order || !llmConfigured) {
+    if (!order || readOnly || !llmConfigured) {
       setLlmVerdict(null)
       setAiLoading(false)
       setAiFailed(false)
@@ -88,18 +111,44 @@ export default function OrderDetail({ data, orderId }: { data: OrderCardData; or
     return () => { alive = false }
   }, [
     order?.id, order?.status, order?.description, order?.workDone,
-    order?.materials, order?.photosAfter.length, order?.completedAt, faultCodes,
+    order?.materials, order?.photosAfter.length, order?.completedAt, faultCodes, readOnly,
   ])
 
   if (!order || !form) {
     return <Screen title="Наряд"><p className="text-sm text-neutral-500">Загрузка…</p></Screen>
   }
 
+  // Лента истории (§4.3): от начальной точки «Наряд выдан» к текущему
+  // состоянию. Если запись о выдаче не сохранилась (старые данные) —
+  // показываем её по времени создания наряда.
+  const feed: HistoryEntry[] = [...history].reverse()
+  if (!feed.some((h) => h.action === 'Наряд выдан')) {
+    feed.unshift({
+      id: `start-${order.id}`,
+      orderId: order.id,
+      actorName: 'Система',
+      action: 'Наряд выдан',
+      changes: [],
+      createdAt: order.createdAt,
+    })
+  }
+
+  /** Клик по записи: детали открываются справа; на узких экранах
+   *  прокручиваем к панели подробностей. */
+  function openEventDetails(h: HistoryEntry) {
+    setSelectedEvent(h)
+    if (window.matchMedia('(max-width: 1023px)').matches) {
+      window.setTimeout(() => {
+        detailRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      }, 0)
+    }
+  }
+
   const actor = data.profile.fullName || 'Мастер'
   const verdict = llmVerdict ?? aiVerdict(order, faultCodes)
   const canAccept = order.status === 'completed'
   const canCancel = !['cancelled', 'closed'].includes(order.status)
-  const isEditable = !['cancelled', 'closed'].includes(order.status)
+  const isEditable = !readOnly && !['cancelled', 'closed'].includes(order.status)
 
   async function saveChanges() {
     if (!order) return
@@ -243,12 +292,13 @@ export default function OrderDetail({ data, orderId }: { data: OrderCardData; or
       </Card>
 
       {isEditable ? (
-        <OrderForm data={data} values={form} onChange={setForm} bigFont={bigFont} showNumber={order.number} />
-      ) : (
+        <OrderForm data={data} values={form} onChange={setForm} bigFont={bigFont} showNumber={order.number} />        ) : (
         <Card>
           <p className="whitespace-pre-wrap text-sm">{order.description}</p>
           <p className="mt-2 text-xs text-neutral-500">
-            Наряд {order.status === 'cancelled' ? 'отменён' : 'закрыт'} — редактирование недоступно.
+            {readOnly
+              ? 'Режим просмотра: правки наряда вносит Мастер.'
+              : `Наряд ${order.status === 'cancelled' ? 'отменён' : 'закрыт'} — редактирование недоступно.`}
           </p>
         </Card>
       )}
@@ -261,7 +311,7 @@ export default function OrderDetail({ data, orderId }: { data: OrderCardData; or
       )}
 
       {/* ---- Приёмка работ (ТЗ §5) + блок §3.2 «Оценка и контроль качества» ---- */}
-      {order.status === 'completed' && canAccept && (
+      {!readOnly && order.status === 'completed' && canAccept && (
         <Card className="border-neutral-900">
           <h3 className="text-lg font-semibold">Оценка и контроль качества (§3.2)</h3>
           <p className="mt-1 text-xs text-neutral-500">
@@ -409,51 +459,105 @@ export default function OrderDetail({ data, orderId }: { data: OrderCardData; or
         </Card>
       )}
 
-      {/* ---- История (ТЗ §4.3) ---- */}
-      <div className="flex flex-col gap-2">
+      {/* ---- История (ТЗ §4.3): лента событий слева, детали — справа ---- */}
+      <div className="flex flex-col gap-3" ref={historyRef} id="order-history">
         <h3 className="text-lg font-semibold">История</h3>
-        {history.length === 0 && <p className="text-sm text-neutral-500">Событий пока нет.</p>}
-        {history.map((h) => (
-          <button
-            key={h.id}
-            type="button"
-            onClick={() => setOpenEvent(h)}
-            className="border border-neutral-200 p-3 text-left text-sm transition-colors hover:border-neutral-900"
-          >
-            <span className="font-medium">{h.actorName}</span> — {h.action}
-            <span className="ml-2 text-xs text-neutral-400">
-              {new Date(h.createdAt).toLocaleString('ru-RU')}
-            </span>
-          </button>
-        ))}
-      </div>
-
-      {openEvent && (
-        <div
-          className="fixed inset-0 z-20 flex items-center justify-center bg-black/40 p-4"
-          onClick={() => setOpenEvent(null)}
-        >
-          <div className="w-full max-w-md border border-neutral-900 bg-white p-5" onClick={(e) => e.stopPropagation()}>
-            <h4 className="text-lg font-semibold">{openEvent.action}</h4>
-            <p className="mt-1 text-sm text-neutral-500">
-              Кто: {openEvent.actorName} · Когда: {new Date(openEvent.createdAt).toLocaleString('ru-RU')}
-            </p>
-            <div className="mt-3 flex flex-col gap-2">
-              {openEvent.changes.map((c, i) => (
-                <p key={i} className="text-sm">
-                  <b>{c.field}:</b>{' '}
-                  <span className="text-neutral-400">{formatValue(c.from)}</span>
-                  {' → '}
-                  <span>{formatValue(c.to)}</span>
-                </p>
+        <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,400px)]">
+          {/* Лента истории: от «Наряд выдан» к текущему состоянию. */}
+          <div className="flex flex-col gap-2">
+            <h4 className="text-xs font-medium uppercase tracking-wide text-neutral-500">
+              Лента истории
+            </h4>
+            <ol className="flex flex-col gap-2">
+              {feed.map((h) => (
+                <li key={h.id}>
+                  <button
+                    type="button"
+                    onClick={() => openEventDetails(h)}
+                    aria-current={selectedEvent?.id === h.id ? 'true' : undefined}
+                    className={`flex w-full flex-col gap-1 border p-3 text-left text-sm transition-colors ${
+                      selectedEvent?.id === h.id
+                        ? 'border-neutral-900 bg-neutral-50'
+                        : 'border-neutral-200 hover:border-neutral-900'
+                    }`}
+                  >
+                    <span className="flex w-full flex-wrap items-baseline justify-between gap-2">
+                      <span>
+                        <span className="font-medium">{h.actorName}</span> — {h.action}
+                      </span>
+                      <span className="shrink-0 text-xs text-neutral-400">
+                        {new Date(h.createdAt).toLocaleString('ru-RU')}
+                      </span>
+                    </span>
+                  </button>
+                </li>
               ))}
-            </div>
-            <div className="mt-4">
-              <Btn variant="ghost" onClick={() => setOpenEvent(null)}>Закрыть</Btn>
-            </div>
+              {/* Текущее состояние — завершающий этап ленты. */}
+              <li className="border border-neutral-900 bg-neutral-900 p-3 text-sm text-white">
+                Текущий статус наряда:{' '}
+                <span className="font-medium">{ORDER_STATUS_LABELS[order.status]}</span>
+              </li>
+            </ol>
           </div>
+
+          {/* Детальная информация: открывается по клику на запись. */}
+          <aside
+            ref={detailRef}
+            className="flex flex-col gap-3 border border-neutral-200 bg-neutral-50 p-4 lg:sticky lg:top-24"
+          >
+            <h4 className="text-xs font-medium uppercase tracking-wide text-neutral-500">
+              Детальная информация
+            </h4>
+            {!selectedEvent ? (
+              <p className="text-sm text-neutral-500">
+                Нажмите на запись в ленте истории, чтобы увидеть время изменения, автора и
+                сравнение «что было → что стало».
+              </p>
+            ) : (
+              <>
+                <h5 className="text-base font-semibold">{selectedEvent.action}</h5>
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+                  <dt className="text-neutral-500">Время изменения</dt>
+                  <dd>{new Date(selectedEvent.createdAt).toLocaleString('ru-RU')}</dd>
+                  <dt className="text-neutral-500">Кто изменил</dt>
+                  <dd>{selectedEvent.actorName}</dd>
+                </dl>
+                <div>
+                  <h6 className="text-xs font-medium uppercase tracking-wide text-neutral-500">
+                    Что было → что стало
+                  </h6>
+                  {selectedEvent.changes.length === 0 ? (
+                    <p className="mt-1 text-sm text-neutral-500">
+                      Конкретных изменений не зафиксировано.
+                    </p>
+                  ) : (
+                    <ul className="mt-2 flex flex-col gap-2">
+                      {selectedEvent.changes.map((c, i) => (
+                        <li
+                          key={i}
+                          className="border-b border-neutral-200 pb-2 text-sm last:border-0 last:pb-0"
+                        >
+                          <span className="font-medium">{c.field}</span>
+                          <span className="mt-0.5 flex flex-wrap items-center gap-2">
+                            <span className="text-neutral-400">
+                              {formatChangeValue(c.field, c.from)}
+                            </span>
+                            <span aria-hidden>→</span>
+                            <span>{formatChangeValue(c.field, c.to)}</span>
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div>
+                  <Btn variant="ghost" onClick={() => setSelectedEvent(null)}>Закрыть</Btn>
+                </div>
+              </>
+            )}
+          </aside>
         </div>
-      )}
+      </div>
     </Screen>
   )
 }
@@ -462,4 +566,24 @@ function formatValue(v: string | null): string {
   if (v == null) return '—'
   if (/^\d{4}-\d{2}-\d{2}T/.test(v)) return new Date(v).toLocaleString('ru-RU')
   return v
+}
+
+/** Значения истории «что было → что стало»: коды статусов/типов/приоритетов
+ *  показываем русскими подписями, остальное — как есть. */
+function formatChangeValue(field: string, v: string | null): string {
+  if (v == null) return '—'
+  const f = field.toLowerCase()
+  if (/статус|status/.test(f) && v in ORDER_STATUS_LABELS) {
+    return ORDER_STATUS_LABELS[v as keyof typeof ORDER_STATUS_LABELS]
+  }
+  if (/тип работ|worktype/.test(f) && v in WORK_TYPE_LABELS) {
+    return WORK_TYPE_LABELS[v as keyof typeof WORK_TYPE_LABELS]
+  }
+  if (/приоритет|priority/.test(f) && v in PRIORITY_LABELS) {
+    return PRIORITY_LABELS[v as keyof typeof PRIORITY_LABELS]
+  }
+  if (/решение|decision/.test(f) && v in DECISION_LABELS) {
+    return DECISION_LABELS[v as keyof typeof DECISION_LABELS]
+  }
+  return formatValue(v)
 }

@@ -1,5 +1,7 @@
-// Корневой компонент: сессия → вход / Мастер / Исполнитель / веб-роли
-// (Веб-руководитель и Веб-администратор — общая веб-панель).
+// Корневой компонент: сессия → вход / Мастер / Исполнитель / веб-роли.
+// Веб-руководитель (Head) и веб-администратор (Admin) — разные должности:
+// руководитель видит аналитику и просмотр нарядов, администратор ведёт
+// справочники §2. Панели раздельные.
 
 import { useEffect, useState } from 'react'
 import { isDemoMode, onAuthChange } from './lib/auth'
@@ -9,6 +11,7 @@ import Login from './screens/Login'
 import MasterApp from './screens/master/MasterApp'
 import WorkerApp from './screens/worker/WorkerApp'
 import AdminApp from './screens/admin/AdminApp'
+import HeadApp from './screens/head/HeadApp'
 
 type Session =
   | { state: 'loading' }
@@ -49,9 +52,13 @@ export default function App() {
   if (session.profile.role === 'Master') {
     return <MasterApp key="master" profile={session.profile} />
   }
-  if (session.profile.role === 'Admin' || session.profile.role === 'Head') {
-    // Веб-роли (руководитель и администратор): внутри AdminApp
-    // дополнительно гейтится на веб-продакшен.
+  if (session.profile.role === 'Head') {
+    // Веб-панель руководителя: дашборд, рейтинг, аномалии — только просмотр
+    // (правки и справочники — у администратора). Гейтится на веб-продакшен.
+    return <HeadApp key="head" profile={session.profile} />
+  }
+  if (session.profile.role === 'Admin') {
+    // Веб-панель администратора (§2): справочники и контроль нарядов.
     return <AdminApp key="admin" profile={session.profile} />
   }
   return <WorkerApp key="worker" profile={session.profile} />

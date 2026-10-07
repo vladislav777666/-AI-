@@ -227,7 +227,7 @@ function AdminDashboard({ data }: { data: AdminData }) {
 
   return (
     <Screen
-      title={data.profile.role === 'Head' ? 'Руководитель' : 'Администрирование'}
+      title="Администрирование"
       subtitle="Справочники предприятия и контроль нарядов (ТЗ §2)"
     >
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">

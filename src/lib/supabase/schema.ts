@@ -30,7 +30,8 @@ export interface DbArea {
 
 export interface DbEquipment {
   id: string
-  areaId: string
+  /** Участок закрепления; null — оборудование без участка (0009). */
+  areaId: string | null
   name: string
 }
 
@@ -40,6 +41,10 @@ export interface DbFaultCode {
   description: string
   active: boolean
   sortOrder: number
+  /** Весовой коэффициент сложности 1..5 (0007, панель руководителя). */
+  complexity?: number | null
+  /** Материальный норматив в единицах списания (0007). */
+  materialNormQty?: number | null
 }
 
 export interface DbWorkOrder {
@@ -152,6 +157,9 @@ export const migrations = [
   '0004_admin_reference_books.sql',
   '0005_admin_role.sql',
   '0006_user_roles.sql',
+  '0007_head_analytics.sql',
+  '0008_head_admin_split.sql',
+  '0009_equipment_area_nullable.sql',
 ] as const
 
 // ---------- Утилиты маппинга ----------

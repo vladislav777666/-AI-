@@ -11,6 +11,8 @@ import OrderDetail from './OrderDetail'
 import Orders from './Orders'
 import Workers from './Workers'
 import Notifications from './Notifications'
+import Reports from './Reports'
+import AiChat from './AiChat'
 import type { MasterData, MasterNav } from './nav'
 import { useSync, type SyncOp } from '../../lib/sync'
 import { BottomNav, type NavItem } from '../../components/ui'
@@ -86,6 +88,8 @@ export default function MasterApp({ profile }: { profile: Profile }) {
     { key: 'orders', label: 'Наряды', icon: '📋' },
     { key: 'issue', label: 'Выдать', icon: '➕' },
     { key: 'workers', label: 'Исполнит.', icon: '👷' },
+    { key: 'reports', label: 'Отчёты', icon: '📊' },
+    { key: 'ai', label: 'ИИ', icon: '✨' },
     { key: 'notifications', label: 'Уведомл.', icon: '🔔' },
   ]
   const activeBottomKey =
@@ -153,7 +157,9 @@ export default function MasterApp({ profile }: { profile: Profile }) {
         )}
         {nav.screen === 'dashboard' && <Dashboard data={data} />}
         {nav.screen === 'orders' && <Orders data={data} presetStatus={nav.statusFilter ?? 'all'} />}
-        {nav.screen === 'order' && <OrderDetail data={data} orderId={nav.id} />}
+        {nav.screen === 'order' && (
+          <OrderDetail data={data} orderId={nav.id} focusHistory={nav.focus === 'history'} />
+        )}
         {nav.screen === 'issue' && <IssueOrder data={data} />}
         {nav.screen === 'workers' && <Workers data={data} />}
         {nav.screen === 'dossier' && <Workers data={data} dossierWorkerId={nav.workerId} />}
@@ -161,6 +167,8 @@ export default function MasterApp({ profile }: { profile: Profile }) {
           <Workers data={data} dossierWorkerId={nav.workerId} equipmentId={nav.equipmentId} />
         )}
         {nav.screen === 'notifications' && <Notifications data={data} />}
+        {nav.screen === 'reports' && <Reports data={data} />}
+        {nav.screen === 'ai' && <AiChat data={data} />}
       </main>
 
       <BottomNav items={bottomNavItems} activeKey={activeBottomKey} onSelect={goTop} />

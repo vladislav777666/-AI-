@@ -192,7 +192,7 @@ export async function listEquipment(): Promise<Equipment[]> {
     const { data, error } = await sb
       .from('equipment').select('id, area_id, name').order('name')
     if (error) throw new Error(error.message)
-    return (data ?? []).map((e) => ({ id: e.id, areaId: e.area_id ?? '', name: e.name }))
+    return (data ?? []).map((e) => ({ id: e.id, areaId: e.area_id ?? null, name: e.name }))
   })
 }
 
@@ -215,8 +215,11 @@ async function createEquipmentDirect(name: string, areaId: string, id: string): 
   if (error) throw new Error(error.message)
 }
 
-/** Смена участка закрепления оборудования (ТЗ §2.1). В 0002 area_id NOT NULL. */
-export async function updateEquipment(id: string, areaId: string): Promise<void> {
+/**
+ * Закрепление оборудования за участком (ТЗ §2.1); areaId = null открепляет его.
+ * Открепление требует миграцию 0009 (в 0002 area_id был NOT NULL).
+ */
+export async function updateEquipment(id: string, areaId: string | null): Promise<void> {
   if (!isSupabaseConfigured || !supabase) return demo.demoUpdateEquipment(id, areaId)
   return persist(
     { fn: 'updateEquipment', args: [id, areaId] },
@@ -225,11 +228,16 @@ export async function updateEquipment(id: string, areaId: string): Promise<void>
   )
 }
 
-async function updateEquipmentDirect(id: string, areaId: string): Promise<void> {
+async function updateEquipmentDirect(id: string, areaId: string | null): Promise<void> {
   const sb = supabase
   if (!sb) throw new Error('Supabase не настроен')
   const { error } = await sb.from('equipment').update({ area_id: areaId }).eq('id', id)
-  if (error) throw new Error(error.message)
+  if (!error) return
+  // 23502: схема ещё не знает состояния «без участка» — нужна миграция 0009.
+  if (areaId === null && error.code === '23502') {
+    throw new Error('Открепить оборудование нельзя: примените миграцию 0009_equipment_area_nullable.sql')
+  }
+  throw new Error(error.message)
 }
 
 // ---------- Материалы и запчасти (ТЗ §2.2) ----------
@@ -473,7 +481,7 @@ export async function listFaultCodes(): Promise<FaultCode[]> {
   return readThrough('faultCodes', async () => {
     const { data, error } = await sb
       .from('fault_codes')
-      .select('code, name, description, norm_hours, material_norm, work_type')
+      .select('code, name, description, norm_hours, material_norm, work_type, complexity, material_norm_qty')
       .eq('active', true)
       .order('sort_order')
     if (error) throw new Error(error.message)
@@ -482,6 +490,8 @@ export async function listFaultCodes(): Promise<FaultCode[]> {
       normHours: f.norm_hours != null ? Number(f.norm_hours) : null,
       materialNorm: f.material_norm,
       workType: (f.work_type as WorkType | null) ?? null,
+      complexity: f.complexity != null ? Number(f.complexity) : null,
+      materialNormQty: f.material_norm_qty != null ? Number(f.material_norm_qty) : null,
     }))
   })
 }
@@ -506,6 +516,8 @@ async function createFaultCodeDirect(input: FaultCode): Promise<void> {
     norm_hours: input.normHours,
     material_norm: input.materialNorm,
     work_type: input.workType,
+    complexity: input.complexity ?? null,
+    material_norm_qty: input.materialNormQty ?? null,
   }, { onConflict: 'code', ignoreDuplicates: true })
   if (error) throw new Error(error.message)
 }
@@ -529,6 +541,8 @@ async function updateFaultCodeDirect(code: string, patch: Partial<FaultCode>): P
   if ('normHours' in patch) update.norm_hours = patch.normHours
   if ('materialNorm' in patch) update.material_norm = patch.materialNorm
   if ('workType' in patch) update.work_type = patch.workType
+  if ('complexity' in patch) update.complexity = patch.complexity
+  if ('materialNormQty' in patch) update.material_norm_qty = patch.materialNormQty
   if (Object.keys(update).length === 0) return
   const { error } = await sb.from('fault_codes').update(update).eq('code', code)
   if (error) throw new Error(error.message)
@@ -584,7 +598,7 @@ async function updateOrderDirect(
     normHours: 'Норматив, ч', photos: 'Фото', photosAfter: 'Фото «после»',
     materialsList: 'Материалы (позиции)', workerComment: 'Комментарий исполнителя',
   }
-  const changes: HistoryChange[] = []
+  const diffs: Array<{ key: string; from: unknown; to: unknown }> = []
   if (before) {
     for (const key of Object.keys(update)) {
       const camel = Object.keys(col).find((k) => col[k] === key)
@@ -592,10 +606,30 @@ async function updateOrderDirect(
       const from = (before as unknown as Record<string, unknown>)[fieldKey] ?? null
       const to = (patch as Record<string, unknown>)[fieldKey] ?? null
       if (JSON.stringify(from) !== JSON.stringify(to)) {
-        changes.push({ field: labels[fieldKey] ?? key, from: stringify(from), to: stringify(to) })
+        diffs.push({ key: fieldKey, from, to })
       }
     }
   }
+
+  // Идентификаторы участка/оборудования/исполнителя в истории показываем
+  // именами, а не UUID. Справочники читаем только если такие поля изменились;
+  // ошибка чтения (офлайн) не ломает саму запись — значения остаются как есть.
+  const names: Record<string, Map<string, string>> = {}
+  if (diffs.some((d) => ['workerId', 'areaId', 'equipmentId'].includes(d.key))) {
+    try {
+      const [ws, ar, eq] = await Promise.all([listWorkers(), listAreas(), listEquipment()])
+      names.workerId = new Map(ws.map((w) => [w.id, w.fullName]))
+      names.areaId = new Map(ar.map((a) => [a.id, a.name]))
+      names.equipmentId = new Map(eq.map((e) => [e.id, e.name]))
+    } catch {
+      // Не удалось прочитать справочники — показываем идентификаторы.
+    }
+  }
+  const changes: HistoryChange[] = diffs.map((d) => ({
+    field: labels[d.key] ?? d.key,
+    from: stringify(names[d.key]?.get(String(d.from)) ?? d.from),
+    to: stringify(names[d.key]?.get(String(d.to)) ?? d.to),
+  }))
 
   if (Object.keys(update).length > 0) {
     const { error } = await sb.from('work_orders').update(update).eq('id', id)
@@ -802,6 +836,24 @@ function mapHistory(row: Record<string, unknown>): HistoryEntry {
 }
 
 // ---------- Приёмка ----------
+
+/** Оценки приёмки ИИ по всем нарядам (orderId → балл 1..5) — для аналитики
+ *  веб-панели руководителя: одним запросом, без N+1 на список нарядов. */
+export async function listAcceptanceScores(): Promise<Record<string, number>> {
+  const sb = supabase
+  if (!isSupabaseConfigured || !sb) return demo.demoAcceptanceScores()
+  return readThrough('acceptanceScores', async () => {
+    const { data, error } = await sb
+      .from('work_order_acceptance')
+      .select('order_id, ai_score')
+    if (error) throw new Error(error.message)
+    const out: Record<string, number> = {}
+    for (const r of data ?? []) {
+      out[(r as { order_id: string }).order_id] = Number((r as { ai_score: number }).ai_score)
+    }
+    return out
+  })
+}
 
 export async function getAcceptance(orderId: string): Promise<Acceptance | null> {
   const sb = supabase
@@ -1062,7 +1114,7 @@ const DB_OPS: Record<DbFnName, (...args: any[]) => Promise<unknown>> = {
   createArea: (name: string, id: string) => createAreaDirect(name, id),
   updateArea: (id: string, name: string) => updateAreaDirect(id, name),
   createEquipment: (name: string, areaId: string, id: string) => createEquipmentDirect(name, areaId, id),
-  updateEquipment: (id: string, areaId: string) => updateEquipmentDirect(id, areaId),
+  updateEquipment: (id: string, areaId: string | null) => updateEquipmentDirect(id, areaId),
   createWorker: (input: WorkerCardInput, id: string) => createWorkerDirect(input, id),
   updateWorker: (id: string, patch: Partial<WorkerCardInput>) => updateWorkerDirect(id, patch),
   updateWorkerStatus: (id: string, status: WorkerStatus) => updateWorkerStatusDirect(id, status),

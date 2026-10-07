@@ -1,7 +1,8 @@
 // Типы модуля «Мастер» + словари подписей.
 
 /** Роли: Мастер и Исполнитель — везде; Веб-руководитель и Веб-администратор —
- *  только веб-продакшен (по правам равны, см. supabase/migrations/0006). */
+ *  только веб-продакшен (разные должности: руководитель — аналитика и
+ *  просмотр, администратор — справочники §2; см. миграции 0006 и 0008). */
 export type Role = 'Master' | 'Worker' | 'Head' | 'Admin'
 
 export type WorkerStatus = 'free' | 'busy' | 'queue' | 'not_on_shift'
@@ -52,7 +53,8 @@ export interface Area {
 
 export interface Equipment {
   id: string
-  areaId: string
+  /** Участок закрепления; null — оборудование не закреплено (ТЗ §2.1). */
+  areaId: string | null
   name: string
 }
 
@@ -97,7 +99,17 @@ export interface FaultCode {
   materialNorm: string | null
   /** Статус «Плановый\Неплановый» (ТЗ §2.5). */
   workType: WorkType | null
+  /** Весовой коэффициент сложности типа поломки, 1..5 (Веб-панель
+   *  руководителя, Раздел 2 п.4): 1 — мелкий ремонт, 5 — капитальный.
+   *  Общий балл = Σ сложность закрытых нарядов. */
+  complexity?: number | null
+  /** Материальный норматив в единицах списания (Раздел 3.4 «По материалам»):
+   *  плановое количество ТМЦ на один наряд, с которым сравнивается факт. */
+  materialNormQty?: number | null
 }
+
+/** Сложность типа поломки по умолчанию, если коэффициент не задан. */
+export const DEFAULT_COMPLEXITY = 3
 
 export interface Notification {
   id: string

@@ -7,7 +7,7 @@
 import { useEffect, useState } from 'react'
 import * as db from '../../lib/db'
 import {
-  WORK_TYPE_LABELS, type FaultCode, type Material, type WorkOrder, type WorkType,
+  WORK_TYPE_LABELS, type Equipment, type FaultCode, type Material, type WorkOrder, type WorkType,
 } from '../../lib/types'
 import { Btn, Card, Screen, Select, TextArea, TextInput } from '../../components/ui'
 import OrdersTable from './OrdersTable'
@@ -126,6 +126,9 @@ function AreasModule({ data }: { data: AdminData }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const areaName = (id: string | null) =>
+    (id && data.areas.find((a) => a.id === id)?.name) || 'Без участка'
+
   function startAdd() {
     setEditingId(null); setName(''); setEqIds([]); setWIds([]); setMIds([]); setError(null); setOpen(true)
   }
@@ -156,11 +159,14 @@ function AreasModule({ data }: { data: AdminData }) {
       else id = (await db.createArea(trimmed)).id
       const eqSel = new Set(eqIds); const wSel = new Set(wIds); const mSel = new Set(mIds)
       await Promise.all([
-        // equipment.area_id NOT NULL (0002): переносим только выбранные,
-        // отвязка неподтверждённых невозможна по схеме.
+        // Оборудование: галочка закрепляет за этим участком (переносит из
+        // прежнего), снятая галочка — открепляет совсем (0009, area_id → null).
         ...data.equipment
           .filter((e) => eqSel.has(e.id))
           .map((e) => db.updateEquipment(e.id, id)),
+        ...data.equipment
+          .filter((e) => !eqSel.has(e.id) && e.areaId === id)
+          .map((e) => db.updateEquipment(e.id, null)),
         ...data.workers
           .filter((w) => wSel.has(w.id) || w.areaId === id)
           .map((w) => db.updateWorker(w.id, { areaId: wSel.has(w.id) ? id : null })),
@@ -193,26 +199,34 @@ function AreasModule({ data }: { data: AdminData }) {
               Название участка
               <TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="Участок №3" />
             </label>
-            <label className="flex flex-col gap-1 text-sm text-neutral-500">
-              Закреплённое оборудование
+            <div className="flex flex-col gap-1 text-sm text-neutral-500">
+              <span>Закреплённое оборудование</span>
               <CheckList
-                options={data.equipment.map((e) => ({ id: e.id, label: e.name }))}
+                options={data.equipment.map((e) => ({
+                  id: e.id,
+                  // Показываем чужой участок и «без участка», чтобы галочка
+                  // не выглядела как переключатель внутри одного участка.
+                  label:
+                    e.areaId === editingId ? e.name
+                    : e.areaId ? `${e.name} · ${areaName(e.areaId)}`
+                    : `${e.name} · без участка`,
+                }))}
                 selected={eqIds}
                 onToggle={(id) => toggle(eqIds, setEqIds, id)}
                 emptyText="Оборудования пока нет"
               />
-            </label>
-            <label className="flex flex-col gap-1 text-sm text-neutral-500">
-              Привязанные сотрудники
+            </div>
+            <div className="flex flex-col gap-1 text-sm text-neutral-500">
+              <span>Привязанные сотрудники</span>
               <CheckList
                 options={data.workers.map((w) => ({ id: w.id, label: w.fullName }))}
                 selected={wIds}
                 onToggle={(id) => toggle(wIds, setWIds, id)}
                 emptyText="Сотрудников пока нет"
               />
-            </label>
+            </div>
             <div className="flex flex-col gap-1 text-sm text-neutral-500 sm:col-span-1">
-              Доступные материалы
+              <span>Доступные материалы</span>
               <CheckList
                 options={(materials ?? []).map((m) => ({ id: m.id, label: m.name }))}
                 selected={mIds}
@@ -223,7 +237,8 @@ function AreasModule({ data }: { data: AdminData }) {
           </div>
           <p className="mt-2 text-xs text-neutral-500">
             Подсказка: отметьте нужные элементы галочками — можно выбрать сразу несколько
-            (галочка снимается повторным кликом).
+            (галочка снимается повторным кликом). Снятая галочка открепляет элемент от участка:
+            оборудование останется в справочнике §2.3 как «без участка», сотрудник и материал — без привязки.
           </p>
           <div className="mt-3 flex gap-3">
             <Btn onClick={save} disabled={busy}>{busy ? 'Сохраняем…' : 'Сохранить'}</Btn>
@@ -399,8 +414,20 @@ function EquipmentModule({ data }: { data: AdminData }) {
     }
   }
 
-  const areaName = (id: string) => data.areas.find((a) => a.id === id)?.name ?? '—'
   const ordersByEq = (id: string) => data.orders.filter((o) => o.equipmentId === id).length
+
+  /** Закрепление оборудования за участком; пустое значение — открепить (ТЗ §2.1). */
+  async function reassign(e: Equipment, nextAreaId: string) {
+    setBusy(true); setError(null)
+    try {
+      await db.updateEquipment(e.id, nextAreaId || null)
+      await data.refresh()
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <Screen
@@ -438,7 +465,23 @@ function EquipmentModule({ data }: { data: AdminData }) {
           <Card key={e.id} onClick={() => data.go({ screen: 'equipmentOrders', equipmentId: e.id })}>
             <div className="flex flex-wrap items-center gap-3">
               <span className="font-medium">{e.name}</span>
-              <span className="text-sm text-neutral-500">Участок: {areaName(e.areaId)}</span>
+              {/* Участок меняется прямо в списке: карточка ведёт к нарядам,
+                  поэтому клики по селекту не должны её открывать. */}
+              <span
+                className="flex items-center gap-2 text-sm text-neutral-500"
+                onClick={(ev) => ev.stopPropagation()}
+              >
+                Участок
+                <Select
+                  value={e.areaId ?? ''}
+                  onChange={(ev) => void reassign(e, ev.target.value)}
+                  disabled={busy}
+                  className="max-w-44 text-sm"
+                >
+                  <option value="">Без участка</option>
+                  {data.areas.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </Select>
+              </span>
               <span className="ml-auto text-xs text-neutral-500">
                 Нарядов: {ordersByEq(e.id)} →
               </span>
@@ -648,10 +691,15 @@ interface FaultCodeForm {
   normHours: string
   materialNorm: string
   workType: WorkType
+  /** Весовой коэффициент сложности 1..5 (панель руководителя, Р. 2 п.4). */
+  complexity: string
+  /** Материальный норматив в единицах списания (Р. 3.4). */
+  materialNormQty: string
 }
 
 const EMPTY_FAULT_FORM: FaultCodeForm = {
   code: '', name: '', description: '', normHours: '', materialNorm: '', workType: 'unplanned',
+  complexity: '3', materialNormQty: '',
 }
 
 function FaultCodesModule({ data }: { data: AdminData }) {
@@ -674,6 +722,8 @@ function FaultCodesModule({ data }: { data: AdminData }) {
         normHours: form.normHours ? Number(form.normHours) : null,
         materialNorm: form.materialNorm.trim() || null,
         workType: form.workType,
+        complexity: form.complexity ? Number(form.complexity) : null,
+        materialNormQty: form.materialNormQty ? Number(form.materialNormQty) : null,
       })
       const fresh = await db.listFaultCodes()
       setCodesLocal(fresh)
@@ -726,6 +776,14 @@ function FaultCodesModule({ data }: { data: AdminData }) {
               Материальный норматив
               <TextInput value={form.materialNorm} onChange={(e) => setForm({ ...form, materialNorm: e.target.value })} placeholder="Подшипник, съёмник, смазка" />
             </label>
+            <label className="flex flex-col gap-1 text-sm text-neutral-500">
+              Сложность, 1–5
+              <TextInput type="number" min={1} max={5} value={form.complexity} onChange={(e) => setForm({ ...form, complexity: e.target.value })} />
+            </label>
+            <label className="flex flex-col gap-1 text-sm text-neutral-500">
+              Норматив ТМЦ (ед. списания)
+              <TextInput type="number" min={0} step={0.5} value={form.materialNormQty} onChange={(e) => setForm({ ...form, materialNormQty: e.target.value })} />
+            </label>
           </div>
           <div className="mt-3 flex gap-3">
             <Btn onClick={save} disabled={busy}>{busy ? 'Сохраняем…' : 'Сохранить'}</Btn>
@@ -772,6 +830,8 @@ export function FaultCodeDetail({ data, code }: { data: AdminData; code: string 
         normHours: current.normHours != null ? String(current.normHours) : '',
         materialNorm: current.materialNorm ?? '',
         workType: current.workType ?? 'unplanned',
+        complexity: current.complexity != null ? String(current.complexity) : '3',
+        materialNormQty: current.materialNormQty != null ? String(current.materialNormQty) : '',
       })
     }
   }, [current, form])
@@ -786,6 +846,8 @@ export function FaultCodeDetail({ data, code }: { data: AdminData; code: string 
         normHours: form.normHours ? Number(form.normHours) : null,
         materialNorm: form.materialNorm.trim() || null,
         workType: form.workType,
+        complexity: form.complexity ? Number(form.complexity) : null,
+        materialNormQty: form.materialNormQty ? Number(form.materialNormQty) : null,
       })
       setSaved(true)
     } catch (err) {
@@ -832,6 +894,14 @@ export function FaultCodeDetail({ data, code }: { data: AdminData; code: string 
           <label className="flex flex-col gap-1 text-sm text-neutral-500 sm:col-span-2">
             Материальный норматив
             <TextInput value={form.materialNorm} onChange={(e) => setForm({ ...form, materialNorm: e.target.value })} />
+          </label>
+          <label className="flex flex-col gap-1 text-sm text-neutral-500">
+            Сложность (1 — мелкий ремонт, 5 — капитальный)
+            <TextInput type="number" min={1} max={5} value={form.complexity} onChange={(e) => setForm({ ...form, complexity: e.target.value })} />
+          </label>
+          <label className="flex flex-col gap-1 text-sm text-neutral-500">
+            Норматив ТМЦ, единиц списания
+            <TextInput type="number" min={0} step={0.5} value={form.materialNormQty} onChange={(e) => setForm({ ...form, materialNormQty: e.target.value })} />
           </label>
         </div>
         <div className="mt-4 flex gap-3">
