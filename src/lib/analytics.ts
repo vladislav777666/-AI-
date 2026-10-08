@@ -236,7 +236,7 @@ export interface RatingRow {
   cancelled: number
   /** R — средняя оценка закрытых нарядов (1..5). */
   avgScore: number | null
-  /** K = C / (C + X). */
+  /** Коэффициент надёжности K = C / (C + X + U + 0,5·J) — см. hoffdingScore. */
   k: number
   /** R_confidence = Avg − 4·√(ln10 / 2C). */
   rConfidence: number
@@ -258,16 +258,50 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v))
 }
 
+/** Составляющие надёжности исполнителя для коэффициента K. */
+export interface ReliabilityInput {
+  /** Закрытые наряды — единственный канал, засчитываемый в плюс. */
+  closed: number
+  /** Отменённые наряды. */
+  cancelled: number
+  /** Отказы с указанной причиной: согласованы, но работа не выполнена. */
+  justifiedRefusals: number
+  /** Отказы без указанной причины: причина не документирована вообще. */
+  unjustifiedRefusals: number
+}
+
+/** Вес уважительного отказа: причина документирована, но наряд не выполнен. */
+export const JUSTIFIED_REFUSAL_WEIGHT = 0.5
+
 /**
  * Консервативная оценка Хёффдинга (Раздел 2, п.1):
- *   K = C/(C+X); R_confidence = Avg − 4·√(ln10 / 2C);
+ *   K = C / (C + X + U + 0,5·J); R_confidence = Avg − 4·√(ln10 / 2C);
  *   Score = 100·(0.7·(R_conf − 1)/4 + 0.3·K).
- * При C = 0 нижняя граница недостижима — берём худшую (1).
+ *
+ * K — коэффициент надёжности: какая доля выданного доведена до закрытия.
+ * Раньше K = C/(C+X) реагировал ТОЛЬКО на отмены, поэтому при отсутствии
+ * отмен он всегда равнялся 1.00 и ничего не показывал. Теперь у потери
+ * два канала:
+ *   X — отменённые наряды (полный вес);
+ *   U — отказы без указанной причины (полный вес — причина не документирована);
+ *   J — отказы с указанной причиной (половина веса: отказ согласован, но
+ *       работа всё равно не сделана — исполнитель отклонил назначенное).
+ * Так исполнитель, который отклоняет больше половины выданного, получает
+ * честно низкий K независимо от того, оформил он причины или нет.
+ *
+ * При отсутствии нарядов вовсе (C + X + U + J = 0) доверия нет: K = 0.
+ * При C = 0 нижняя граница Хёффдинга недостижима — берём худшую (1).
  */
-export function hoffdingScore(closed: number, cancelled: number, avgScore: number | null): {
+export function hoffdingScore(
+  reliability: ReliabilityInput,
+  avgScore: number | null,
+): {
   k: number; rConfidence: number; score: number
 } {
-  const denom = closed + cancelled
+  const { closed, cancelled, justifiedRefusals, unjustifiedRefusals } = reliability
+  const losses =
+    cancelled + unjustifiedRefusals + JUSTIFIED_REFUSAL_WEIGHT * justifiedRefusals
+  const denom = closed + losses
   const k = denom > 0 ? closed / denom : 0
   const rConfidence = closed > 0 && avgScore != null
     ? clamp(avgScore - 4 * Math.sqrt(Math.log(10) / (2 * closed)), 1, 5)
@@ -323,7 +357,20 @@ export function workerRatings(input: AnalyticsInput, period: Period, now = Date.
       ? total(closedScores) / closedScores.length
       : (closed > 0 ? worker.rating : null)
 
-    const { k, rConfidence, score } = hoffdingScore(closed, cancelled, avgScore)
+    // Отказы — второй канал потерь в K (см. hoffdingScore),
+    // поэтому считаем их до расчёта балла.
+    const rejected = mine.filter((o) => o.status === 'rejected')
+    const unjustifiedRefusals = rejected.filter((o) => !(o.rejectReason ?? '').trim()).length
+
+    const { k, rConfidence, score } = hoffdingScore(
+      {
+        closed,
+        cancelled,
+        justifiedRefusals: rejected.length - unjustifiedRefusals,
+        unjustifiedRefusals,
+      },
+      avgScore,
+    )
 
     const onTime = closedOrders.filter((o) => {
       const done = new Date(o.closedAt ?? o.completedAt ?? o.createdAt).getTime()
@@ -337,9 +384,6 @@ export function workerRatings(input: AnalyticsInput, period: Period, now = Date.
     const complexityScore = total(
       closedOrders.map((o) => (o.faultCode ? complexityOf.get(o.faultCode) ?? DEFAULT_COMPLEXITY : DEFAULT_COMPLEXITY)),
     )
-
-    const rejected = mine.filter((o) => o.status === 'rejected')
-    const unjustifiedRefusals = rejected.filter((o) => !(o.rejectReason ?? '').trim()).length
 
     return {
       worker, closed, cancelled, avgScore, k, rConfidence, score,
@@ -658,7 +702,17 @@ export function brigadeRatings(
     const avgScore = scoredClosed > 0
       ? total(scored.map((r) => (r.avgScore ?? 0) * r.closed)) / scoredClosed
       : null
-    const { k, rConfidence, score } = hoffdingScore(closed, cancelled, avgScore)
+    const refusals = total(list.map((r) => r.refusals))
+    const unjustifiedRefusals = total(list.map((r) => r.unjustifiedRefusals))
+    const { k, rConfidence, score } = hoffdingScore(
+      {
+        closed,
+        cancelled,
+        justifiedRefusals: refusals - unjustifiedRefusals,
+        unjustifiedRefusals,
+      },
+      avgScore,
+    )
     const onTime = total(list.map((r) =>
       r.onTimeShare == null ? 0 : Math.round(r.onTimeShare * r.closed),
     ))
@@ -673,8 +727,8 @@ export function brigadeRatings(
       score,
       onTimeShare: closed > 0 ? onTime / closed : null,
       complexityScore: total(list.map((r) => r.complexityScore)),
-      refusals: total(list.map((r) => r.refusals)),
-      unjustifiedRefusals: total(list.map((r) => r.unjustifiedRefusals)),
+      refusals,
+      unjustifiedRefusals,
     })
   }
   return out.sort((a, b) => b.score - a.score)

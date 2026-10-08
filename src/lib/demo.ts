@@ -702,11 +702,16 @@ function seedBulk(s: DemoStore): void {
     'Нет материалов', 'Нет допуска', 'Занят аварийным обслуживанием', null,
   ]
   let pendingPpr: { eq: string; daysAgo: number } | null = null
+  // Счётчик внеплановых нарядов: долю «проблемного узла» задаём именно по нему,
+  // потому что условие i % 9 === 0 недостижимо внутри ветки внеплановых (i % 3 !== 0).
+  let unplannedSeq = 0
   for (let i = 0; i < total; i++) {
     const daysAgo = 3 + Math.floor((i * 85) / Math.max(1, total)) // 3..87 дней (3 месяца)
     // 1) Плановый ремонт…
     if (i % 14 === 0 && total - i > 2) {
-      const eq = equipment[(i * 5) % equipment.length]
+      // (i * 5) % length при i, кратном 14, даёт всего 5 разных единиц —
+      // берём порядковый номер ППР, чтобы оборудование распределялось ровно.
+      const eq = equipment[Math.floor(i / 14) % equipment.length]
       push({
         eq: eq.id, worker: workers[(i * 3) % workers.length].id, type: 'planned',
         code: pln[i % pln.length], daysAgo, reactH: 1, workH: 2, status: 'closed', deadlineDays: 3,
@@ -736,11 +741,18 @@ function seedBulk(s: DemoStore): void {
       continue
     }
     // 4) Основная масса: конвейер — проблемный узел (~3× чаще остальных):
-    //    у него 1/9 внеплановых, у каждого остального — 7/9/24 ≈ 1/27.
+    //    каждый 7-й внеплановый наряд достаётся ему, остальные делятся
+    //    между прочим оборудованием.
     const isUnplanned = i % 3 !== 0
-    const eq = isUnplanned
-      ? (i % 9 === 0 ? conveyor : others[(i * 7) % others.length] ?? conveyor)
-      : equipment[(i * 11) % equipment.length]
+    let eqId: string
+    if (isUnplanned) {
+      unplannedSeq += 1
+      eqId = unplannedSeq % 5 === 0
+        ? conveyor.id
+        : (others[(i * 7) % others.length] ?? conveyor).id
+    } else {
+      eqId = equipment[(i * 11) % equipment.length].id
+    }
     const code = isUnplanned ? unpl[i % unpl.length] : pln[i % pln.length]
     const priority: Priority | undefined = isUnplanned
       ? (['normal', 'normal', 'high', 'emergency', 'normal', 'high'] as Priority[])[i % 6]
@@ -755,7 +767,7 @@ function seedBulk(s: DemoStore): void {
         }]
       : undefined
     push({
-      eq: eq.id,
+      eq: eqId,
       worker: workers[(i * 7) % workers.length].id,
       type: isUnplanned ? 'unplanned' : 'planned',
       code,
@@ -769,6 +781,25 @@ function seedBulk(s: DemoStore): void {
       materials,
     })
   }
+  // --- Отменённые наряды: они входят в потери коэффициента надёжности
+  //     K = C/(C+X+U+0,5·J) (см. hoffdingScore). Без отмен K держится только
+  //     на отказах, а у дисциплинированных исполнителей он тогда равен 1.00.
+  //     Распределены неравномерно: часть исполнителей не отменяла ничего.
+  for (let i = 0; i < 30; i++) {
+    push({
+      eq: equipment[(i * 13) % equipment.length].id,
+      worker: workers[(i * i) % workers.length].id,
+      type: 'unplanned',
+      code: unpl[i % unpl.length],
+      daysAgo: 5 + ((i * 3) % 80),
+      reactH: null,
+      workH: null,
+      status: 'cancelled',
+      deadlineDays: 1,
+      rejectReason: 'Оборудование выведено в резерв, работы не требуются',
+    })
+  }
+
   s.bulkSeeded = true
   save()
 }
